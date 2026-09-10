@@ -1,9 +1,9 @@
-# GeoTIFF to KMZ SuperOverlay Converter 🌍
+# GeoTIFF to KMZ SuperOverlay Converter
 
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/)
 [![GDAL](https://img.shields.io/badge/GDAL-3.8%2B-brightgreen.svg)](https://gdal.org/)
 [![PySide6](https://img.shields.io/badge/GUI-PySide6-green.svg)](https://doc.qt.io/qtforpython/)
-
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 一个基于 **Python + GDAL + PySide6** 的高性能遥感影像金字塔切片与 Google Earth KMZ 转换工具。
 
@@ -16,22 +16,23 @@ gdal_translate -of KMLSUPEROVERLAY -co FORMAT=PNG input.tif output.kmz
 
 ## 项目核心特性
 
--  **100% 官方等效**：原生调用 `osgeo.gdal.Translate`，采用 `KMLSUPEROVERLAY` 驱动与四叉树（Quadtree LOD）金字塔切片机制。
--  **投影智能校准**：Google Earth 严格基于 WGS84 经纬度（EPSG:4326）。工具内置自动投影检测与内存流重投影（`gdal.Warp`），避免非 4326 投影（如 UTM、高斯克吕格）在 Google Earth 中错位。
--  **现代双模交互**：
-  - **GUI 桌面模式**：支持文件拖拽、实时进度条（0%~100%）、异步多线程防卡死、转换完毕一键定位。
-  - **CLI 批处理模式**：支持终端直接传参，便于脚本自动化集成。
--  **免安装便携化打包**：自带 `build.py`，内置解决 GDAL C++ 运行时及 PROJ 数据字典打包丢失的痛点。
+- **100% 官方等效**：原生调用 `osgeo.gdal.Translate`，采用 `KMLSUPEROVERLAY` 驱动与四叉树（Quadtree LOD）金字塔切片机制。
+- **投影智能校准**：Google Earth 严格基于 WGS84 经纬度（EPSG:4326）。工具内置自动投影检测与内存流重投影（`gdal.Warp`），避免非 4326 投影在 Google Earth 中错位。
+- **工业级桌面交互**：
+  - 支持单文件或批量多选/拖拽排队切片。
+  - 支持自定义统一输出目录，内置严格去重保护。
+  - 异步多线程防界面卡死，双击结果行一键定位成果文件。
+- **免安装便携化打包**：自带 `build.py`，内置解决 GDAL C++ 运行时及 PROJ 数据字典打包丢失的痛点。
 
 ---
 
-##  极速环境复现（一键安装）
+## 极速环境复现（一键安装）
 
 由于 GDAL 含有大量底层 C/C++ 动态链接库，直接使用 `pip install gdal` 极易出现编译失败。**强烈推荐使用 Conda-forge 一键复现全部环境**：
 
 ```bash
 # 1. 克隆本项目
-git clone https://github.com/你的用户名/tif_kmz.git
+git clone https://github.com/zyp0714/tif_kmz.git
 cd tif_kmz
 
 # 2. 从配置文件一键创建并安装完整环境 (包含 GDAL + PySide6 + PyInstaller)
@@ -43,13 +44,13 @@ conda activate tif_kmz
 
 ---
 
-##  运行使用
+## 运行使用
 
 ### 1. 桌面图形界面 (GUI)
 ```bash
 python main.py
 ```
-> 直接拖拽 `.tif` 或 `.tiff` 栅格文件进窗口，点击 **开始转换** 即可。
+> 点击「添加文件」或直接批量拖拽 `.tif` / `.tiff` 文件进入列表，设定输出目录后点击 **开始处理** 即可。
 
 ### 2. 命令行批处理 (CLI)
 ```bash
@@ -62,13 +63,13 @@ python main.py -i input.tif -o output.kmz --no-warp
 
 ---
 
-##  打包为独立可执行程序 (EXE)
+## 打包为独立可执行程序 (EXE)
 
 在已激活的虚拟环境中运行：
 ```bash
 python build.py
 ```
-打包完成后，可在 `dist/tif2kmz/` 目录下得到 `tif2kmz.exe`。该目录为**绿色免安装文件夹**，可直接打包拷贝到任何没有安装 Python、QGIS 或 Conda 的 Windows 机器上直接运行。
+打包完成后，可在 `dist/tif2kmz/` 目录下得到 `tif2kmz.exe` 绿色免安装运行文件夹，可直接打包拷贝到任何没有安装 Python、QGIS 或 Conda 的 Windows 机器上直接运行。
 
 ---
 
@@ -85,7 +86,3 @@ tif_kmz/
 ├── main.py             # 程序主入口（PySide6 现代桌面界面 + CLI 兼容模式）
 └── build.py            # 自动化打包脚本（处理 GDAL / PROJ 依赖注入）
 ```
-
----
-
-
