@@ -152,10 +152,10 @@ def convert_tif_to_kmz(
             if progress_callback:
                 progress_callback(0.04, f"检测到单波段数据，正在应用 QML 色标渲染: {os.path.basename(qml_path)}...")
 
-            color_entries = parse_qml_color_ramp(qml_path)
+            color_entries, ramp_type = parse_qml_color_ramp(qml_path)
             fd, temp_color_file = tempfile.mkstemp(suffix="_color.txt")
             os.close(fd)
-            generate_gdal_color_file(color_entries, temp_color_file)
+            generate_gdal_color_file(color_entries, temp_color_file, ramp_type=ramp_type)
 
             dem_opts = gdal.DEMProcessingOptions(
                 colorFilename=temp_color_file,

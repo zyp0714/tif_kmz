@@ -40,12 +40,14 @@ def parse_color_str(color_val: str, default_alpha: int = 255) -> Tuple[int, int,
     return 0, 0, 0, default_alpha
 
 
-def parse_qml_color_ramp(qml_path: str) -> List[Tuple[float, int, int, int, int]]:
+import math
+
+def parse_qml_color_ramp(qml_path: str) -> Tuple[List[Tuple[float, int, int, int, int]], str]:
     """
-    解析 QGIS .qml 样式文件，提取单波段伪彩色（Singleband Pseudocolor）的阶梯色标表。
+    解析 QGIS .qml 样式文件，提取单波段伪彩色（Singleband Pseudocolor）的色标表及渲染模式。
 
     :param qml_path: .qml 文件路径
-    :return: 排序后的列表 [(value, R, G, B, Alpha), ...]
+    :return: (排序后的列表 [(value, R, G, B, Alpha), ...], ramp_type 如 "DISCRETE" 或 "INTERPOLATED")
     """
     if not os.path.exists(qml_path):
         raise FileNotFoundError(f"未找到 QML 样式文件: {qml_path}")
@@ -54,9 +56,14 @@ def parse_qml_color_ramp(qml_path: str) -> List[Tuple[float, int, int, int, int]
     root = tree.getroot()
 
     color_entries: List[Tuple[float, int, int, int, int]] = []
+    ramp_type = "INTERPOLATED"
 
-    # 1. 寻找 <colorrampshader> 节点
+    # 1. 寻找主渲染管道中的 <colorrampshader> 节点
     for cr_shader in root.iter('colorrampshader'):
+        shader_type = cr_shader.get('colorRampType')
+        if shader_type:
+            ramp_type = shader_type.strip().upper()
+
         for item in cr_shader.iter('item'):
             val_str = item.get('value')
             color_str = item.get('color')
@@ -66,6 +73,7 @@ def parse_qml_color_ramp(qml_path: str) -> List[Tuple[float, int, int, int, int]
                 continue
 
             try:
+                # 兼容 "inf" 极端形变
                 val = float(val_str)
                 default_alpha = int(float(alpha_str)) if alpha_str else 255
                 r, g, b, a = parse_color_str(color_str, default_alpha)
@@ -73,7 +81,11 @@ def parse_qml_color_ramp(qml_path: str) -> List[Tuple[float, int, int, int, int]
             except ValueError:
                 continue
 
-    # 2. 如果标准 <colorrampshader> 没找到，兼容其他可能的色卡节点
+        # 一旦成功解析出主着色器色标，停止后续遍历（防止重复解析 originalStyle 中的历史记录）
+        if color_entries:
+            break
+
+    # 2. 如果标准 <colorrampshader> 没找到，兼容其他通用 item 节点
     if not color_entries:
         for item in root.iter('item'):
             val_str = item.get('value')
@@ -91,22 +103,46 @@ def parse_qml_color_ramp(qml_path: str) -> List[Tuple[float, int, int, int, int]
 
     # 按照数值升序排序
     color_entries.sort(key=lambda x: x[0])
-    return color_entries
+    return color_entries, ramp_type
 
 
-def generate_gdal_color_file(color_entries: List[Tuple[float, int, int, int, int]], output_txt_path: str):
+def generate_gdal_color_file(
+    color_entries: List[Tuple[float, int, int, int, int]],
+    output_txt_path: str,
+    ramp_type: str = "INTERPOLATED"
+):
     """
     将解析出的色标表生成为 GDAL DEMProcessing (color-relief) 所需的标准格式文本。
-
-    格式示例:
-      -40.0 177 62 130 255
-      -30.0 212 95 52 255
-      nv 0 0 0 0
+    支持：
+      - DISCRETE（离散阶梯色块）：自动生成微步长区间边界，防止颜色渐变模糊，100% 还原 QGIS 阶梯图；
+      - INTERPOLATED（连续线性插值）：生成平滑过渡色谱。
     """
     lines = []
     lines.append("# GDAL color-relief table generated from QGIS QML style\n")
-    for val, r, g, b, a in color_entries:
-        lines.append(f"{val} {r} {g} {b} {a}\n")
+
+    if ramp_type == "DISCRETE" and len(color_entries) > 1:
+        # 离散色阶切片模式：
+        # 第 0 级：覆盖负无穷到第 0 个阈值
+        r0, g0, b0, a0 = color_entries[0][1:]
+        lines.append(f"-1000000000.0 {r0} {g0} {b0} {a0}\n")
+        lines.append(f"{color_entries[0][0]:.4f} {r0} {g0} {b0} {a0}\n")
+
+        # 第 1 ~ N-1 级：从前一阈值微小偏移 (eps=0.0001) 到当前阈值
+        for i in range(1, len(color_entries)):
+            prev_v = color_entries[i - 1][0]
+            curr_v = color_entries[i][0]
+            r, g, b, a = color_entries[i][1:]
+
+            start_v = prev_v + 0.0001
+            end_v = 1000000000.0 if math.isinf(curr_v) else curr_v
+            lines.append(f"{start_v:.4f} {r} {g} {b} {a}\n")
+            lines.append(f"{end_v:.4f} {r} {g} {b} {a}\n")
+    else:
+        # 线性渐变模式
+        for val, r, g, b, a in color_entries:
+            val_str = "1000000000.0" if math.isinf(val) else f"{val:.4f}"
+            lines.append(f"{val_str} {r} {g} {b} {a}\n")
+
     # 设置 NoData (nv) 为完全透明
     lines.append("nv 0 0 0 0\n")
 
