@@ -2,6 +2,7 @@ import os
 import sys
 import argparse
 import subprocess
+from typing import Optional
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
