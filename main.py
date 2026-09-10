@@ -592,6 +592,33 @@ class MainWindow(QMainWindow):
                 else:
                     subprocess.Popen(["xdg-open", os.path.dirname(os.path.abspath(out_file))])
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.apply_light_title_bar()
+
+    def apply_light_title_bar(self):
+        """调用 Windows DWM API，将系统标题栏强制设为纯白/浅色"""
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                from ctypes import c_int, byref, sizeof
+                hwnd = int(self.winId())
+
+                # 1. 禁用 Windows 沉浸式深色模式 (DWMWA_USE_IMMERSIVE_DARK_MODE)
+                false_val = c_int(0)
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, byref(false_val), sizeof(false_val))
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 19, byref(false_val), sizeof(false_val))
+
+                # 2. Windows 11: 强制设置标题栏背景色为纯白 (COLORREF: 0x00FFFFFF)
+                caption_color = c_int(0x00FFFFFF)
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 35, byref(caption_color), sizeof(caption_color))
+
+                # 3. Windows 11: 标题栏文字颜色设为深灰黑 (COLORREF: 0x003B291E)
+                text_color = c_int(0x003B291E)
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 36, byref(text_color), sizeof(text_color))
+            except Exception:
+                pass
+
 
 def run_cli(args):
     """CLI 命令行运行模式"""
@@ -629,6 +656,8 @@ def main():
     if args.input and args.output:
         run_cli(args)
     else:
+        # 强制 Qt Windows 平台不启用深色模式
+        os.environ["QT_QPA_PLATFORM"] = "windows:darkmode=0"
         app = QApplication(sys.argv)
         window = MainWindow()
         window.show()
