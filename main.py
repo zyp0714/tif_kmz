@@ -10,12 +10,13 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QProgressBar, QTextEdit, QTableWidget,
     QTableWidgetItem, QHeaderView, QFileDialog, QCheckBox,
-    QMessageBox, QFrame, QStatusBar, QLineEdit
+    QMessageBox, QFrame, QStatusBar, QLineEdit, QComboBox
 )
 from PySide6.QtGui import QFont, QDragEnterEvent, QDropEvent
 from osgeo import gdal, osr
 
-from converter import convert_tif_to_kmz, is_wgs84, setup_gdal_env
+from converter import convert_tif_to_kmz, is_wgs84, setup_gdal_env, get_raster_metadata
+from qml_parser import get_default_qml_path
 
 
 class TaskWorker(QThread):
@@ -23,11 +24,12 @@ class TaskWorker(QThread):
     progress_signal = Signal(float, str)
     finished_signal = Signal(bool, str)
 
-    def __init__(self, input_tif: str, output_kmz: str, auto_reproject: bool):
+    def __init__(self, input_tif: str, output_kmz: str, auto_reproject: bool, qml_path: Optional[str] = None):
         super().__init__()
         self.input_tif = input_tif
         self.output_kmz = output_kmz
         self.auto_reproject = auto_reproject
+        self.qml_path = qml_path
         self._is_cancelled = False
 
     def cancel(self):
@@ -39,6 +41,7 @@ class TaskWorker(QThread):
                 input_tif=self.input_tif,
                 output_kmz=self.output_kmz,
                 auto_reproject=self.auto_reproject,
+                qml_path=self.qml_path,
                 progress_callback=lambda ratio, msg: self.progress_signal.emit(ratio, msg),
                 cancel_check=lambda: self._is_cancelled
             )
@@ -54,7 +57,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.worker: Optional[TaskWorker] = None
-        self.tasks: List[Dict[str, str]] = []
+        self.tasks: List[Dict[str, Any]] = []
         self.current_task_idx = 0
         self.is_batch_running = False
 
@@ -62,11 +65,11 @@ class MainWindow(QMainWindow):
 
     def init_ui(self):
         self.setWindowTitle("GeoTIFF to KMZ Processor")
-        self.resize(980, 680)
-        self.setMinimumSize(850, 580)
+        self.resize(1000, 700)
+        self.setMinimumSize(880, 600)
         self.setAcceptDrops(True)
 
-        # 工业专业风 QSS 样式表（参考现代企业级桌面端工具规范）
+        # 工业专业风 QSS 样式表
         self.setStyleSheet("""
             QMainWindow {
                 background-color: #f8fafc;
@@ -106,6 +109,18 @@ class MainWindow(QMainWindow):
                 color: #1e293b;
             }
             QLineEdit:focus {
+                border-color: #3b82f6;
+            }
+            QComboBox {
+                background-color: #ffffff;
+                border: 1px solid #cbd5e1;
+                border-radius: 4px;
+                padding: 4px 8px;
+                font-size: 12px;
+                color: #1e293b;
+                min-width: 280px;
+            }
+            QComboBox:focus {
                 border-color: #3b82f6;
             }
             QPushButton#primaryBtn {
@@ -297,7 +312,7 @@ class MainWindow(QMainWindow):
         out_dir_layout = QHBoxLayout()
         out_dir_label = QLabel("输出目录:", result_frame)
         out_dir_label.setObjectName("sectionTitle")
-        out_dir_label.setFixedWidth(60)
+        out_dir_label.setFixedWidth(65)
 
         self.out_dir_edit = QLineEdit(result_frame)
         self.out_dir_edit.setPlaceholderText("默认保存至源文件所在目录 (可点击右侧按钮指定统一输出目录)")
@@ -316,6 +331,33 @@ class MainWindow(QMainWindow):
         out_dir_layout.addWidget(self.select_out_dir_btn)
         out_dir_layout.addWidget(self.open_out_dir_btn)
         result_layout.addLayout(out_dir_layout)
+
+        # QML 样式配置行 (专为单波段沉降/DEM 伪彩色上色)
+        qml_layout = QHBoxLayout()
+        qml_label = QLabel("QML 样式:", result_frame)
+        qml_label.setObjectName("sectionTitle")
+        qml_label.setFixedWidth(65)
+
+        self.qml_combo = QComboBox(result_frame)
+        self.qml_combo.addItem("[默认] InSAR 地表沉降标准色标 (-40mm ~ +40mm)", "DEFAULT")
+        self.qml_combo.addItem("自定义 QML 样式文件...", "CUSTOM")
+        self.qml_combo.addItem("无 (单波段不进行伪彩色渲染)", "NONE")
+        self.qml_combo.currentIndexChanged.connect(self.on_qml_mode_changed)
+
+        self.qml_path_edit = QLineEdit(result_frame)
+        self.qml_path_edit.setPlaceholderText("请选择自定义 .qml 文件路径")
+        self.qml_path_edit.setVisible(False)
+
+        self.select_qml_btn = QPushButton("浏览 QML", result_frame)
+        self.select_qml_btn.setObjectName("secondaryBtn")
+        self.select_qml_btn.setVisible(False)
+        self.select_qml_btn.clicked.connect(self.choose_custom_qml)
+
+        qml_layout.addWidget(qml_label)
+        qml_layout.addWidget(self.qml_combo)
+        qml_layout.addWidget(self.qml_path_edit, 1)
+        qml_layout.addWidget(self.select_qml_btn)
+        result_layout.addLayout(qml_layout)
 
         # 表格控件
         self.table = QTableWidget(result_frame)
@@ -369,6 +411,7 @@ class MainWindow(QMainWindow):
         self.status_bar.addPermanentWidget(self.status_ready_label)
 
         self.append_log("系统环境初始化完成，GDAL KMLSuperOverlay 驱动就绪。")
+        self.append_log("内置 InSAR 沉降色阶 (-40mm ~ +40mm) 样式已就绪。")
 
     # 日志输出
     def append_log(self, msg: str):
@@ -377,6 +420,37 @@ class MainWindow(QMainWindow):
 
     def clear_logs(self):
         self.log_text.clear()
+
+    # QML 样式选择事件
+    def on_qml_mode_changed(self, index: int):
+        mode = self.qml_combo.currentData()
+        is_custom = (mode == "CUSTOM")
+        self.qml_path_edit.setVisible(is_custom)
+        self.select_qml_btn.setVisible(is_custom)
+
+        if mode == "DEFAULT":
+            self.append_log("已选择: [默认] InSAR 地表沉降标准色标 (-40mm ~ +40mm)")
+        elif mode == "NONE":
+            self.append_log("已停用 QML 伪彩色渲染 (单波段将以原生灰度输出)")
+
+    def choose_custom_qml(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "选择 QGIS QML 样式文件", "", "QGIS 图层样式 (*.qml);;所有文件 (*.*)"
+        )
+        if file_path:
+            self.qml_path_edit.setText(file_path)
+            self.append_log(f"已载入自定义 QML: {os.path.basename(file_path)}")
+
+    def get_effective_qml_path(self) -> Optional[str]:
+        """获取当前生效的 QML 样式路径"""
+        mode = self.qml_combo.currentData()
+        if mode == "DEFAULT":
+            default_p = get_default_qml_path()
+            return default_p if os.path.exists(default_p) else None
+        elif mode == "CUSTOM":
+            custom_p = self.qml_path_edit.text().strip()
+            return custom_p if custom_p and os.path.exists(custom_p) else None
+        return None
 
     # 拖拽文件支持
     def dragEnterEvent(self, event: QDragEnterEvent):
@@ -436,7 +510,6 @@ class MainWindow(QMainWindow):
         setup_gdal_env()
         custom_dir = self.out_dir_edit.text().strip()
         has_custom = bool(custom_dir and os.path.isdir(custom_dir))
-        skipped_count = 0
 
         for fp in file_paths:
             abs_fp = os.path.abspath(fp)
@@ -448,38 +521,29 @@ class MainWindow(QMainWindow):
             out_kmz = os.path.join(dir_name, f"{name_no_ext}.kmz")
             norm_out = os.path.normcase(os.path.abspath(out_kmz))
 
-            # 1. 输入源文件去重拦截（大小写不敏感判断）
+            # 1. 输入源文件去重拦截
             if any(os.path.normcase(t['input']) == norm_fp for t in self.tasks):
                 self.append_log(f"重复文件已自动过滤: {base_name}")
-                skipped_count += 1
                 continue
 
-            # 2. 目标输出 KMZ 去重拦截（避免同名导致重复输出到同一 KMZ）
+            # 2. 目标输出 KMZ 去重拦截
             if any(os.path.normcase(t['output']) == norm_out for t in self.tasks):
                 self.append_log(f"目标输出已存在于任务列表中，已自动去重: {os.path.basename(out_kmz)}")
-                skipped_count += 1
                 continue
 
-            # 探测原始坐标系
-            srs_desc = "未知坐标系"
-            try:
-                ds = gdal.Open(abs_fp, gdal.GA_ReadOnly)
-                if ds:
-                    proj = ds.GetProjection()
-                    if proj:
-                        srs = osr.SpatialReference()
-                        srs.ImportFromWkt(proj)
-                        srs_name = srs.GetName() or srs.GetAttrValue('AUTHORITY', 0)
-                        auth_code = srs.GetAuthorityCode(None)
-                        srs_desc = f"EPSG:{auth_code}" if auth_code else srs_name
-                    ds = None
-            except Exception:
-                pass
+            # 探测元数据
+            meta = get_raster_metadata(abs_fp)
+            band_count = meta.get("band_count", 1)
+            srs_desc = meta.get("srs_desc", "未知坐标系")
+
+            # 动态格式描述
+            format_desc = "单波段 QML着色" if band_count == 1 else "多波段 PNG切片"
 
             task = {
                 "input": abs_fp,
                 "output": out_kmz,
                 "srs": srs_desc,
+                "band_count": band_count,
                 "status": "等待处理",
                 "detail": "-"
             }
@@ -490,11 +554,12 @@ class MainWindow(QMainWindow):
             self.table.insertRow(row)
             self.table.setItem(row, 0, QTableWidgetItem(base_name))
             self.table.setItem(row, 1, QTableWidgetItem(srs_desc))
-            self.table.setItem(row, 2, QTableWidgetItem("PNG 切片"))
+            self.table.setItem(row, 2, QTableWidgetItem(format_desc))
             self.table.setItem(row, 3, QTableWidgetItem("等待处理"))
             self.table.setItem(row, 4, QTableWidgetItem("-"))
 
-            self.append_log(f"已载入文件: {base_name} ({srs_desc})")
+            band_info = f"单波段({band_count}波段)" if band_count == 1 else f"多波段({band_count}波段)"
+            self.append_log(f"已载入: {base_name} | {band_info} | {srs_desc}")
 
         total = len(self.tasks)
         self.progress_ratio_label.setText(f"0 / {total} · 0.0%")
@@ -557,19 +622,26 @@ class MainWindow(QMainWindow):
         self.table.setItem(self.current_task_idx, 3, QTableWidgetItem("正在处理"))
         self.table.setItem(self.current_task_idx, 4, QTableWidgetItem("切片生成中..."))
 
+        # 决定当前任务的生效 QML
+        effective_qml = None
+        if task.get("band_count", 1) == 1:
+            effective_qml = self.get_effective_qml_path()
+            if effective_qml:
+                self.append_log(f"应用样式: {os.path.basename(effective_qml)} -> {base_name}")
+
         self.append_log(f"开始切片: {base_name} -> {os.path.basename(task['output'])}")
 
         self.worker = TaskWorker(
             input_tif=task['input'],
             output_kmz=task['output'],
-            auto_reproject=self.chk_reproject.isChecked()
+            auto_reproject=self.chk_reproject.isChecked(),
+            qml_path=effective_qml
         )
         self.worker.progress_signal.connect(self.on_task_progress)
         self.worker.finished_signal.connect(self.on_task_finished)
         self.worker.start()
 
     def on_task_progress(self, ratio: float, msg: str):
-        # 当前子任务百分比
         task_percent = int(ratio * 100)
         total = len(self.tasks)
         overall_ratio = (self.current_task_idx + ratio) / total
@@ -616,7 +688,7 @@ class MainWindow(QMainWindow):
                 from ctypes import c_int, byref, sizeof
                 hwnd = int(self.winId())
 
-                # 1. 禁用 Windows 沉浸式深色模式 (DWMWA_USE_IMMERSIVE_DARK_MODE)
+                # 1. 禁用 Windows 沉浸式深色模式
                 false_val = c_int(0)
                 ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, byref(false_val), sizeof(false_val))
                 ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 19, byref(false_val), sizeof(false_val))
@@ -625,7 +697,7 @@ class MainWindow(QMainWindow):
                 caption_color = c_int(0x00FFFFFF)
                 ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 35, byref(caption_color), sizeof(caption_color))
 
-                # 3. Windows 11: 标题栏文字颜色设为深灰黑 (COLORREF: 0x003B291E)
+                # 3. Windows 11: 标题栏文字颜色设为深灰黑
                 text_color = c_int(0x003B291E)
                 ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 36, byref(text_color), sizeof(text_color))
             except Exception:
@@ -639,6 +711,13 @@ def run_cli(args):
     print(f"[*] 输出文件: {args.output}")
     print(f"[*] 自动重投影: {not args.no_warp}")
 
+    qml_file = args.qml
+    if not qml_file:
+        default_qml = get_default_qml_path()
+        if os.path.exists(default_qml):
+            qml_file = default_qml
+            print(f"[*] 自动启用默认 QML 沉降样式: {os.path.basename(qml_file)}")
+
     def cli_progress(ratio, msg):
         percent = int(ratio * 100)
         bar = ('=' * (percent // 2)).ljust(50)
@@ -649,6 +728,7 @@ def run_cli(args):
             input_tif=args.input,
             output_kmz=args.output,
             auto_reproject=not args.no_warp,
+            qml_path=qml_file,
             progress_callback=cli_progress
         )
         print("\n[OK] 转换完成。")
@@ -661,6 +741,7 @@ def main():
     parser = argparse.ArgumentParser(description="GeoTIFF to KMZ Processor (GDAL KML SuperOverlay)")
     parser.add_argument("-i", "--input", help="输入 .tif 路径")
     parser.add_argument("-o", "--output", help="输出 .kmz 路径")
+    parser.add_argument("-q", "--qml", help="可选 QML 样式文件路径 (对单波段生效，留空默认使用内置沉降色标)")
     parser.add_argument("--no-warp", action="store_true", help="禁用自动重投影 EPSG:4326")
 
     args = parser.parse_args()
