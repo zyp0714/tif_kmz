@@ -1,0 +1,9 @@
+name: tif_kmz
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.12
+  - gdal=3.8*
+  - pyside6
+  - pyinstaller

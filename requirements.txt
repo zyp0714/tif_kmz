@@ -1,0 +1,5 @@
+# 核心依赖清单（推荐优先使用 environment.yml 通过 conda 安装 GDAL）
+PySide6>=6.6.0
+pyinstaller>=6.0.0
+# 注意：Windows 下 pip 安装 GDAL 通常需要先下载预编译 wheel，推荐直接使用 Conda: conda install -c conda-forge gdal
+gdal>=3.8.0
