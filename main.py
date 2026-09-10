@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QProgressBar, QTextEdit, QTableWidget,
     QTableWidgetItem, QHeaderView, QFileDialog, QCheckBox,
-    QMessageBox, QFrame, QStatusBar
+    QMessageBox, QFrame, QStatusBar, QLineEdit
 )
 from PySide6.QtGui import QFont, QDragEnterEvent, QDropEvent
 from osgeo import gdal, osr
@@ -96,6 +96,17 @@ class MainWindow(QMainWindow):
             QLabel#statusTag {
                 font-size: 12px;
                 color: #64748b;
+            }
+            QLineEdit {
+                background-color: #ffffff;
+                border: 1px solid #cbd5e1;
+                border-radius: 4px;
+                padding: 4px 8px;
+                font-size: 12px;
+                color: #1e293b;
+            }
+            QLineEdit:focus {
+                border-color: #3b82f6;
             }
             QPushButton#primaryBtn {
                 background-color: #3b82f6;
@@ -196,13 +207,10 @@ class MainWindow(QMainWindow):
         title_layout = QVBoxLayout()
         title_label = QLabel("GeoTIFF to KMZ Processor", self)
         title_label.setObjectName("headerTitle")
-        sub_title_label = QLabel("GDAL KML SuperOverlay Generation & Projection Calibration", self)
-        sub_title_label.setObjectName("headerSubTitle")
         title_layout.addWidget(title_label)
-        title_layout.addWidget(sub_title_label)
 
         action_layout = QVBoxLayout()
-        action_layout.setAlignment(Qt.AlignRight | Qt.AlignTop)
+        action_layout.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         version_label = QLabel("Version 1.0.0", self)
         version_label.setObjectName("headerSubTitle")
         version_label.setAlignment(Qt.AlignRight)
@@ -285,6 +293,30 @@ class MainWindow(QMainWindow):
         table_header_layout.addWidget(self.clear_table_btn)
         result_layout.addLayout(table_header_layout)
 
+        # 输出目录配置行
+        out_dir_layout = QHBoxLayout()
+        out_dir_label = QLabel("输出目录:", result_frame)
+        out_dir_label.setObjectName("sectionTitle")
+        out_dir_label.setFixedWidth(60)
+
+        self.out_dir_edit = QLineEdit(result_frame)
+        self.out_dir_edit.setPlaceholderText("默认保存至源文件所在目录 (可点击右侧按钮指定统一输出目录)")
+        self.out_dir_edit.textChanged.connect(self.on_output_dir_changed)
+
+        self.select_out_dir_btn = QPushButton("选择目录", result_frame)
+        self.select_out_dir_btn.setObjectName("secondaryBtn")
+        self.select_out_dir_btn.clicked.connect(self.choose_output_dir)
+
+        self.open_out_dir_btn = QPushButton("打开目录", result_frame)
+        self.open_out_dir_btn.setObjectName("secondaryBtn")
+        self.open_out_dir_btn.clicked.connect(self.open_current_output_dir)
+
+        out_dir_layout.addWidget(out_dir_label)
+        out_dir_layout.addWidget(self.out_dir_edit)
+        out_dir_layout.addWidget(self.select_out_dir_btn)
+        out_dir_layout.addWidget(self.open_out_dir_btn)
+        result_layout.addLayout(out_dir_layout)
+
         # 表格控件
         self.table = QTableWidget(result_frame)
         self.table.setColumnCount(5)
@@ -364,8 +396,47 @@ class MainWindow(QMainWindow):
         if file_paths:
             self.add_files(file_paths)
 
+    def choose_output_dir(self):
+        cur_dir = self.out_dir_edit.text().strip()
+        target_dir = QFileDialog.getExistingDirectory(self, "选择输出保存目录", cur_dir if os.path.isdir(cur_dir) else "")
+        if target_dir:
+            self.out_dir_edit.setText(target_dir)
+
+    def open_current_output_dir(self):
+        target_dir = self.out_dir_edit.text().strip()
+        if not target_dir or not os.path.exists(target_dir):
+            if self.tasks:
+                target_dir = os.path.dirname(self.tasks[0]["output"])
+        if target_dir and os.path.exists(target_dir):
+            if sys.platform == "win32":
+                subprocess.Popen(f'explorer "{os.path.abspath(target_dir)}"')
+            else:
+                subprocess.Popen(["xdg-open", target_dir])
+        else:
+            QMessageBox.information(self, "提示", "尚未选择有效的输出目录，或尚未添加处理任务。")
+
+    def on_output_dir_changed(self, text: str):
+        target_dir = text.strip()
+        has_custom = bool(target_dir and os.path.isdir(target_dir))
+        for t in self.tasks:
+            base_name = os.path.basename(t["input"])
+            name_no_ext = os.path.splitext(base_name)[0]
+            if has_custom:
+                t["output"] = os.path.join(target_dir, f"{name_no_ext}.kmz")
+            else:
+                t["output"] = os.path.join(os.path.dirname(t["input"]), f"{name_no_ext}.kmz")
+
+        if has_custom:
+            self.status_info_label.setText(f"输出目录: {target_dir}")
+            self.append_log(f"输出目录已变更为: {target_dir}")
+        elif self.tasks:
+            self.status_info_label.setText("输出目录: 与源文件同目录")
+
     def add_files(self, file_paths: List[str]):
         setup_gdal_env()
+        custom_dir = self.out_dir_edit.text().strip()
+        has_custom = bool(custom_dir and os.path.isdir(custom_dir))
+
         for fp in file_paths:
             fp = os.path.abspath(fp)
             # 避免重复添加
@@ -373,8 +444,9 @@ class MainWindow(QMainWindow):
                 continue
 
             base_name = os.path.basename(fp)
-            dir_name = os.path.dirname(fp)
-            out_kmz = os.path.join(dir_name, f"{os.path.splitext(base_name)[0]}.kmz")
+            name_no_ext = os.path.splitext(base_name)[0]
+            dir_name = custom_dir if has_custom else os.path.dirname(fp)
+            out_kmz = os.path.join(dir_name, f"{name_no_ext}.kmz")
 
             # 探测原始坐标系
             srs_desc = "未知坐标系"
@@ -414,7 +486,9 @@ class MainWindow(QMainWindow):
 
         total = len(self.tasks)
         self.progress_ratio_label.setText(f"0 / {total} · 0.0%")
-        if file_paths:
+        if has_custom:
+            self.status_info_label.setText(f"输出目录: {custom_dir}")
+        elif file_paths:
             self.status_info_label.setText(f"目录: {os.path.dirname(file_paths[0])}")
 
     def clear_tasks(self):
