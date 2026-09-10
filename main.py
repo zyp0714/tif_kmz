@@ -436,22 +436,34 @@ class MainWindow(QMainWindow):
         setup_gdal_env()
         custom_dir = self.out_dir_edit.text().strip()
         has_custom = bool(custom_dir and os.path.isdir(custom_dir))
+        skipped_count = 0
 
         for fp in file_paths:
-            fp = os.path.abspath(fp)
-            # 避免重复添加
-            if any(t['input'] == fp for t in self.tasks):
-                continue
+            abs_fp = os.path.abspath(fp)
+            norm_fp = os.path.normcase(abs_fp)
 
             base_name = os.path.basename(fp)
             name_no_ext = os.path.splitext(base_name)[0]
-            dir_name = custom_dir if has_custom else os.path.dirname(fp)
+            dir_name = custom_dir if has_custom else os.path.dirname(abs_fp)
             out_kmz = os.path.join(dir_name, f"{name_no_ext}.kmz")
+            norm_out = os.path.normcase(os.path.abspath(out_kmz))
+
+            # 1. 输入源文件去重拦截（大小写不敏感判断）
+            if any(os.path.normcase(t['input']) == norm_fp for t in self.tasks):
+                self.append_log(f"重复文件已自动过滤: {base_name}")
+                skipped_count += 1
+                continue
+
+            # 2. 目标输出 KMZ 去重拦截（避免同名导致重复输出到同一 KMZ）
+            if any(os.path.normcase(t['output']) == norm_out for t in self.tasks):
+                self.append_log(f"目标输出已存在于任务列表中，已自动去重: {os.path.basename(out_kmz)}")
+                skipped_count += 1
+                continue
 
             # 探测原始坐标系
             srs_desc = "未知坐标系"
             try:
-                ds = gdal.Open(fp, gdal.GA_ReadOnly)
+                ds = gdal.Open(abs_fp, gdal.GA_ReadOnly)
                 if ds:
                     proj = ds.GetProjection()
                     if proj:
@@ -465,7 +477,7 @@ class MainWindow(QMainWindow):
                 pass
 
             task = {
-                "input": fp,
+                "input": abs_fp,
                 "output": out_kmz,
                 "srs": srs_desc,
                 "status": "等待处理",
