@@ -141,7 +141,7 @@ def convert_tif_to_kmz(
         out_ds = None
 
         if progress_callback:
-            progress_callback(1.0, "转换完成！KMZ 文件已成功保存。")
+            progress_callback(1.0, "切片完成，KMZ 文件已生成。")
         return True
 
     finally:

@@ -2,22 +2,25 @@ import os
 import sys
 import argparse
 import subprocess
-from typing import Optional
+from datetime import datetime
+from typing import Optional, List, Dict
+
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QLineEdit, QPushButton, QProgressBar, QTextEdit,
-    QFileDialog, QCheckBox, QMessageBox, QGroupBox, QFrame
+    QLabel, QPushButton, QProgressBar, QTextEdit, QTableWidget,
+    QTableWidgetItem, QHeaderView, QFileDialog, QCheckBox,
+    QMessageBox, QFrame, QStatusBar
 )
-from PySide6.QtGui import QFont, QIcon, QDragEnterEvent, QDropEvent
+from PySide6.QtGui import QFont, QDragEnterEvent, QDropEvent
+from osgeo import gdal, osr
 
-# 导入核心转换逻辑
-from converter import convert_tif_to_kmz
+from converter import convert_tif_to_kmz, is_wgs84, setup_gdal_env
 
 
-class ConvertWorker(QThread):
-    """后台转换线程，防止界面无响应"""
-    progress_changed = Signal(float, str)
+class TaskWorker(QThread):
+    """后台单任务转换线程"""
+    progress_signal = Signal(float, str)
     finished_signal = Signal(bool, str)
 
     def __init__(self, input_tif: str, output_kmz: str, auto_reproject: bool):
@@ -36,312 +39,489 @@ class ConvertWorker(QThread):
                 input_tif=self.input_tif,
                 output_kmz=self.output_kmz,
                 auto_reproject=self.auto_reproject,
-                progress_callback=lambda ratio, msg: self.progress_changed.emit(ratio, msg),
+                progress_callback=lambda ratio, msg: self.progress_signal.emit(ratio, msg),
                 cancel_check=lambda: self._is_cancelled
             )
             if success:
-                self.finished_signal.emit(True, "转换成功完成！")
+                self.finished_signal.emit(True, "处理完成")
             else:
-                self.finished_signal.emit(False, "转换已中止或未完成。")
+                self.finished_signal.emit(False, "任务已中止")
         except Exception as e:
-            self.finished_signal.emit(False, f"转换出错: {str(e)}")
-
-
-class DropAreaWidget(QFrame):
-    """支持拖拽文件的区域"""
-    file_dropped = Signal(str)
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setAcceptDrops(True)
-        self.setStyleSheet("""
-            QFrame {
-                border: 2px dashed #3b82f6;
-                border-radius: 10px;
-                background-color: #f8fafc;
-                min-height: 80px;
-            }
-            QFrame:hover {
-                background-color: #eff6ff;
-                border-color: #2563eb;
-            }
-        """)
-        layout = QVBoxLayout(self)
-        self.label = QLabel("📥 将 .tif / .tiff 栅格文件直接拖拽至此处", self)
-        self.label.setAlignment(Qt.AlignCenter)
-        self.label.setStyleSheet("color: #475569; font-size: 14px; font-weight: 500;")
-        layout.addWidget(self.label)
-
-    def dragEnterEvent(self, event: QDragEnterEvent):
-        if event.mimeData().hasUrls():
-            urls = event.mimeData().urls()
-            if urls and urls[0].toLocalFile().lower().endswith(('.tif', '.tiff')):
-                event.acceptProposedAction()
-
-    def dropEvent(self, event: QDropEvent):
-        urls = event.mimeData().urls()
-        if urls:
-            file_path = urls[0].toLocalFile()
-            self.file_dropped.emit(file_path)
+            self.finished_signal.emit(False, f"错误: {str(e)}")
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.worker: Optional[ConvertWorker] = None
+        self.worker: Optional[TaskWorker] = None
+        self.tasks: List[Dict[str, str]] = []
+        self.current_task_idx = 0
+        self.is_batch_running = False
+
         self.init_ui()
 
     def init_ui(self):
-        self.setWindowTitle("TIF 转 KMZ SuperOverlay 工具 (GDAL)")
-        self.resize(680, 560)
-        self.setMinimumSize(580, 480)
+        self.setWindowTitle("GeoTIFF to KMZ Processor")
+        self.resize(980, 680)
+        self.setMinimumSize(850, 580)
+        self.setAcceptDrops(True)
 
-        # 整体现代浅蓝灰优雅质感 QSS
+        # 工业专业风 QSS 样式表（参考现代企业级桌面端工具规范）
         self.setStyleSheet("""
             QMainWindow {
-                background-color: #f1f5f9;
+                background-color: #f8fafc;
             }
-            QLabel {
-                font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
-                color: #1e293b;
+            QWidget {
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
             }
-            QLineEdit {
-                border: 1px solid #cbd5e1;
-                border-radius: 6px;
-                padding: 6px 10px;
+            QFrame#cardFrame {
                 background-color: #ffffff;
-                font-size: 13px;
+                border: 1px solid #e2e8f0;
+                border-radius: 6px;
+            }
+            QLabel#headerTitle {
+                font-size: 20px;
+                font-weight: 700;
                 color: #0f172a;
             }
-            QLineEdit:focus {
-                border: 1px solid #3b82f6;
+            QLabel#headerSubTitle {
+                font-size: 12px;
+                color: #64748b;
             }
-            QPushButton {
-                background-color: #2563eb;
-                color: white;
-                font-weight: 600;
-                border: none;
-                border-radius: 6px;
-                padding: 8px 16px;
+            QLabel#sectionTitle {
                 font-size: 13px;
+                font-weight: 600;
+                color: #1e293b;
             }
-            QPushButton:hover {
+            QLabel#statusTag {
+                font-size: 12px;
+                color: #64748b;
+            }
+            QPushButton#primaryBtn {
+                background-color: #3b82f6;
+                color: #ffffff;
+                font-size: 13px;
+                font-weight: 500;
+                border: none;
+                border-radius: 4px;
+                padding: 6px 16px;
+                min-height: 20px;
+            }
+            QPushButton#primaryBtn:hover {
+                background-color: #2563eb;
+            }
+            QPushButton#primaryBtn:pressed {
                 background-color: #1d4ed8;
             }
-            QPushButton:pressed {
-                background-color: #1e40af;
-            }
-            QPushButton:disabled {
+            QPushButton#primaryBtn:disabled {
                 background-color: #94a3b8;
             }
-            QPushButton#browseBtn {
-                background-color: #e2e8f0;
-                color: #334155;
-                font-weight: 500;
+            QPushButton#secondaryBtn {
+                background-color: #ffffff;
+                color: #475569;
+                font-size: 12px;
+                border: 1px solid #cbd5e1;
+                border-radius: 4px;
+                padding: 4px 12px;
             }
-            QPushButton#browseBtn:hover {
-                background-color: #cbd5e1;
+            QPushButton#secondaryBtn:hover {
+                background-color: #f1f5f9;
+                color: #1e293b;
             }
             QProgressBar {
                 border: 1px solid #e2e8f0;
-                border-radius: 6px;
+                border-radius: 3px;
+                background-color: #edf2f7;
+                height: 10px;
                 text-align: center;
-                background-color: #e2e8f0;
-                height: 20px;
-                font-weight: bold;
-                color: #1e293b;
+                font-size: 9px;
             }
             QProgressBar::chunk {
-                background-color: #10b981;
-                border-radius: 5px;
+                background-color: #3b82f6;
+                border-radius: 2px;
             }
-            QTextEdit {
-                border: 1px solid #cbd5e1;
-                border-radius: 6px;
+            QTableWidget {
                 background-color: #ffffff;
-                font-family: "Consolas", "Courier New", monospace;
+                border: 1px solid #e2e8f0;
+                border-radius: 4px;
+                gridline-color: #f1f5f9;
                 font-size: 12px;
                 color: #334155;
             }
+            QTableWidget::item {
+                padding: 4px 8px;
+            }
+            QTableWidget::item:selected {
+                background-color: #eff6ff;
+                color: #1e40af;
+            }
+            QHeaderView::section {
+                background-color: #f8fafc;
+                color: #475569;
+                font-size: 12px;
+                font-weight: 600;
+                border: none;
+                border-bottom: 1px solid #e2e8f0;
+                padding: 6px 8px;
+            }
+            QTextEdit#logBox {
+                background-color: #ffffff;
+                border: 1px solid #e2e8f0;
+                border-radius: 4px;
+                font-family: "Consolas", "Courier New", monospace;
+                font-size: 11px;
+                color: #475569;
+                padding: 6px;
+            }
             QCheckBox {
-                font-size: 13px;
-                color: #334155;
+                font-size: 12px;
+                color: #475569;
+            }
+            QStatusBar {
+                background-color: #ffffff;
+                border-top: 1px solid #e2e8f0;
+                font-size: 11px;
+                color: #64748b;
             }
         """)
 
         central_widget = QWidget(self)
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
-        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.setContentsMargins(24, 16, 24, 16)
         main_layout.setSpacing(14)
 
-        # 拖拽区域
-        self.drop_area = DropAreaWidget(self)
-        self.drop_area.file_dropped.connect(self.set_input_file)
-        main_layout.addWidget(self.drop_area)
+        # 1. 顶栏 (Header Section)
+        header_layout = QHBoxLayout()
+        title_layout = QVBoxLayout()
+        title_label = QLabel("GeoTIFF to KMZ Processor", self)
+        title_label.setObjectName("headerTitle")
+        sub_title_label = QLabel("GDAL KML SuperOverlay Generation & Projection Calibration", self)
+        sub_title_label.setObjectName("headerSubTitle")
+        title_layout.addWidget(title_label)
+        title_layout.addWidget(sub_title_label)
 
-        # 输入文件选择
-        in_layout = QHBoxLayout()
-        in_label = QLabel("输入 TIF:", self)
-        in_label.setFixedWidth(70)
-        self.input_edit = QLineEdit(self)
-        self.input_edit.setPlaceholderText("请选择或拖入 .tif / .tiff 栅格影像文件")
-        self.input_edit.textChanged.connect(self.auto_set_output)
-        in_browse = QPushButton("浏览...", self)
-        in_browse.setObjectName("browseBtn")
-        in_browse.clicked.connect(self.browse_input)
-        in_layout.addWidget(in_label)
-        in_layout.addWidget(self.input_edit)
-        in_layout.addWidget(in_browse)
-        main_layout.addLayout(in_layout)
+        action_layout = QVBoxLayout()
+        action_layout.setAlignment(Qt.AlignRight | Qt.AlignTop)
+        version_label = QLabel("Version 1.0.0", self)
+        version_label.setObjectName("headerSubTitle")
+        version_label.setAlignment(Qt.AlignRight)
 
-        # 输出文件选择
-        out_layout = QHBoxLayout()
-        out_label = QLabel("输出 KMZ:", self)
-        out_label.setFixedWidth(70)
-        self.output_edit = QLineEdit(self)
-        self.output_edit.setPlaceholderText("输出 .kmz 路径 (自动填充)")
-        out_browse = QPushButton("浏览...", self)
-        out_browse.setObjectName("browseBtn")
-        out_browse.clicked.connect(self.browse_output)
-        out_layout.addWidget(out_label)
-        out_layout.addWidget(self.output_edit)
-        out_layout.addWidget(out_browse)
-        main_layout.addLayout(out_layout)
+        btn_row = QHBoxLayout()
+        self.add_file_btn = QPushButton("添加文件", self)
+        self.add_file_btn.setObjectName("secondaryBtn")
+        self.add_file_btn.clicked.connect(self.choose_files)
 
-        # 参数选项
-        opt_layout = QHBoxLayout()
-        self.chk_reproject = QCheckBox("自动校准为 WGS84 (EPSG:4326) 投影 (推荐开启，Google Earth 必须)", self)
-        self.chk_reproject.setChecked(True)
-        opt_layout.addWidget(self.chk_reproject)
-        main_layout.addLayout(opt_layout)
+        self.start_btn = QPushButton("开始处理", self)
+        self.start_btn.setObjectName("primaryBtn")
+        self.start_btn.clicked.connect(self.start_processing)
 
-        # 进度条与状态
-        self.status_label = QLabel("就绪", self)
-        self.status_label.setStyleSheet("color: #64748b; font-size: 12px;")
-        main_layout.addWidget(self.status_label)
+        btn_row.addWidget(self.add_file_btn)
+        btn_row.addWidget(self.start_btn)
 
-        self.progress_bar = QProgressBar(self)
+        action_layout.addWidget(version_label)
+        action_layout.addLayout(btn_row)
+
+        header_layout.addLayout(title_layout)
+        header_layout.addStretch()
+        header_layout.addLayout(action_layout)
+        main_layout.addLayout(header_layout)
+
+        # 2. 当前任务卡片 (Current Task Card)
+        task_frame = QFrame(self)
+        task_frame.setObjectName("cardFrame")
+        task_layout = QVBoxLayout(task_frame)
+        task_layout.setContentsMargins(16, 12, 16, 12)
+        task_layout.setSpacing(8)
+
+        task_top_row = QHBoxLayout()
+        task_title = QLabel("当前任务", task_frame)
+        task_title.setObjectName("sectionTitle")
+        self.task_status_tag = QLabel("等待开始", task_frame)
+        self.task_status_tag.setObjectName("statusTag")
+        task_top_row.addWidget(task_title)
+        task_top_row.addStretch()
+        task_top_row.addWidget(self.task_status_tag)
+        task_layout.addLayout(task_top_row)
+
+        self.progress_bar = QProgressBar(task_frame)
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
-        main_layout.addWidget(self.progress_bar)
+        self.progress_bar.setTextVisible(False)
+        task_layout.addWidget(self.progress_bar)
 
-        # 操作按钮区
-        btn_layout = QHBoxLayout()
-        self.start_btn = QPushButton("🚀 开始转换 (KML SuperOverlay)", self)
-        self.start_btn.setFixedHeight(38)
-        self.start_btn.clicked.connect(self.start_conversion)
+        task_bottom_row = QHBoxLayout()
+        self.task_detail_label = QLabel("选择文件或拖拽 .tif 文件到列表中开始处理", task_frame)
+        self.task_detail_label.setObjectName("statusTag")
+        self.progress_ratio_label = QLabel("0 / 0 · 0.0%", task_frame)
+        self.progress_ratio_label.setObjectName("statusTag")
+        task_bottom_row.addWidget(self.task_detail_label)
+        task_bottom_row.addStretch()
+        task_bottom_row.addWidget(self.progress_ratio_label)
+        task_layout.addLayout(task_bottom_row)
 
-        self.open_dir_btn = QPushButton("📁 打开输出目录", self)
-        self.open_dir_btn.setObjectName("browseBtn")
-        self.open_dir_btn.setFixedHeight(38)
-        self.open_dir_btn.setEnabled(False)
-        self.open_dir_btn.clicked.connect(self.open_output_folder)
+        main_layout.addWidget(task_frame)
 
-        btn_layout.addWidget(self.start_btn, 2)
-        btn_layout.addWidget(self.open_dir_btn, 1)
-        main_layout.addLayout(btn_layout)
+        # 3. 处理结果表格卡片 (Results Section)
+        result_frame = QFrame(self)
+        result_frame.setObjectName("cardFrame")
+        result_layout = QVBoxLayout(result_frame)
+        result_layout.setContentsMargins(16, 12, 16, 12)
+        result_layout.setSpacing(8)
 
-        # 日志控制台
-        log_label = QLabel("运行日志:", self)
-        log_label.setStyleSheet("font-weight: 600; color: #475569;")
-        main_layout.addWidget(log_label)
+        table_header_layout = QHBoxLayout()
+        table_title = QLabel("处理结果", result_frame)
+        table_title.setObjectName("sectionTitle")
+        self.chk_reproject = QCheckBox("自动校准为 WGS84 (EPSG:4326) 坐标系", result_frame)
+        self.chk_reproject.setChecked(True)
 
-        self.log_edit = QTextEdit(self)
-        self.log_edit.setReadOnly(True)
-        main_layout.addWidget(self.log_edit)
+        self.clear_table_btn = QPushButton("清空列表", result_frame)
+        self.clear_table_btn.setObjectName("secondaryBtn")
+        self.clear_table_btn.clicked.connect(self.clear_tasks)
 
-        self.log("程序就绪。底层调用 GDAL KMLSUPEROVERLAY 驱动生成瓦片金字塔。")
+        table_header_layout.addWidget(table_title)
+        table_header_layout.addStretch()
+        table_header_layout.addWidget(self.chk_reproject)
+        table_header_layout.addWidget(self.clear_table_btn)
+        result_layout.addLayout(table_header_layout)
 
-    def log(self, text: str):
-        self.log_edit.append(text)
+        # 表格控件
+        self.table = QTableWidget(result_frame)
+        self.table.setColumnCount(5)
+        self.table.setHorizontalHeaderLabels(["文件名", "原始坐标系", "格式选项", "状态", "详细信息"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.verticalHeader().setVisible(False)
+        self.table.doubleClicked.connect(self.on_table_double_clicked)
+        result_layout.addWidget(self.table)
 
-    def set_input_file(self, file_path: str):
-        self.input_edit.setText(file_path)
+        main_layout.addWidget(result_frame, 3)
 
-    def auto_set_output(self, in_path: str):
-        if in_path and not self.output_edit.text():
-            base, _ = os.path.splitext(in_path)
-            self.output_edit.setText(f"{base}.kmz")
+        # 4. 运行日志卡片 (Log Section)
+        log_frame = QFrame(self)
+        log_frame.setObjectName("cardFrame")
+        log_layout = QVBoxLayout(log_frame)
+        log_layout.setContentsMargins(16, 12, 16, 12)
+        log_layout.setSpacing(8)
 
-    def browse_input(self):
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, "选择 TIF 栅格影像", "", "GeoTIFF 栅格 (*.tif *.tiff);;所有文件 (*.*)"
+        log_header_layout = QHBoxLayout()
+        log_title = QLabel("运行日志", log_frame)
+        log_title.setObjectName("sectionTitle")
+        self.clear_log_btn = QPushButton("清空日志", log_frame)
+        self.clear_log_btn.setObjectName("secondaryBtn")
+        self.clear_log_btn.clicked.connect(self.clear_logs)
+        log_header_layout.addWidget(log_title)
+        log_header_layout.addStretch()
+        log_header_layout.addWidget(self.clear_log_btn)
+        log_layout.addLayout(log_header_layout)
+
+        self.log_text = QTextEdit(log_frame)
+        self.log_text.setObjectName("logBox")
+        self.log_text.setReadOnly(True)
+        self.log_text.setFixedHeight(95)
+        log_layout.addWidget(self.log_text)
+
+        main_layout.addWidget(log_frame, 1)
+
+        # 5. 底部状态栏
+        self.status_bar = QStatusBar(self)
+        self.setStatusBar(self.status_bar)
+        self.status_info_label = QLabel("目录: 未选择", self)
+        self.status_ready_label = QLabel("Ready", self)
+        self.status_bar.addWidget(self.status_info_label, 1)
+        self.status_bar.addPermanentWidget(self.status_ready_label)
+
+        self.append_log("系统环境初始化完成，GDAL KMLSuperOverlay 驱动就绪。")
+
+    # 日志输出
+    def append_log(self, msg: str):
+        now_str = datetime.now().strftime("%H:%M:%S")
+        self.log_text.append(f"[{now_str}] {msg}")
+
+    def clear_logs(self):
+        self.log_text.clear()
+
+    # 拖拽文件支持
+    def dragEnterEvent(self, event: QDragEnterEvent):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event: QDropEvent):
+        urls = event.mimeData().urls()
+        files = [u.toLocalFile() for u in urls if u.toLocalFile().lower().endswith(('.tif', '.tiff'))]
+        if files:
+            self.add_files(files)
+
+    def choose_files(self):
+        file_paths, _ = QFileDialog.getOpenFileNames(
+            self, "选择 GeoTIFF 文件", "", "GeoTIFF 栅格 (*.tif *.tiff)"
         )
-        if file_path:
-            self.input_edit.setText(file_path)
-            base, _ = os.path.splitext(file_path)
-            self.output_edit.setText(f"{base}.kmz")
+        if file_paths:
+            self.add_files(file_paths)
 
-    def browse_output(self):
-        file_path, _ = QFileDialog.getSaveFileName(
-            self, "设置输出 KMZ 文件", self.output_edit.text(), "Google Earth KMZ (*.kmz)"
-        )
-        if file_path:
-            if not file_path.lower().endswith('.kmz'):
-                file_path += '.kmz'
-            self.output_edit.setText(file_path)
+    def add_files(self, file_paths: List[str]):
+        setup_gdal_env()
+        for fp in file_paths:
+            fp = os.path.abspath(fp)
+            # 避免重复添加
+            if any(t['input'] == fp for t in self.tasks):
+                continue
 
-    def start_conversion(self):
-        in_file = self.input_edit.text().strip()
-        out_file = self.output_edit.text().strip()
+            base_name = os.path.basename(fp)
+            dir_name = os.path.dirname(fp)
+            out_kmz = os.path.join(dir_name, f"{os.path.splitext(base_name)[0]}.kmz")
 
-        if not in_file or not os.path.exists(in_file):
-            QMessageBox.warning(self, "提示", "请选择有效的输入 TIF 文件！")
+            # 探测原始坐标系
+            srs_desc = "未知坐标系"
+            try:
+                ds = gdal.Open(fp, gdal.GA_ReadOnly)
+                if ds:
+                    proj = ds.GetProjection()
+                    if proj:
+                        srs = osr.SpatialReference()
+                        srs.ImportFromWkt(proj)
+                        srs_name = srs.GetName() or srs.GetAttrValue('AUTHORITY', 0)
+                        auth_code = srs.GetAuthorityCode(None)
+                        srs_desc = f"EPSG:{auth_code}" if auth_code else srs_name
+                    ds = None
+            except Exception:
+                pass
+
+            task = {
+                "input": fp,
+                "output": out_kmz,
+                "srs": srs_desc,
+                "status": "等待处理",
+                "detail": "-"
+            }
+            self.tasks.append(task)
+
+            # 插入表格
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            self.table.setItem(row, 0, QTableWidgetItem(base_name))
+            self.table.setItem(row, 1, QTableWidgetItem(srs_desc))
+            self.table.setItem(row, 2, QTableWidgetItem("PNG 切片"))
+            self.table.setItem(row, 3, QTableWidgetItem("等待处理"))
+            self.table.setItem(row, 4, QTableWidgetItem("-"))
+
+            self.append_log(f"已载入文件: {base_name} ({srs_desc})")
+
+        total = len(self.tasks)
+        self.progress_ratio_label.setText(f"0 / {total} · 0.0%")
+        if file_paths:
+            self.status_info_label.setText(f"目录: {os.path.dirname(file_paths[0])}")
+
+    def clear_tasks(self):
+        if self.is_batch_running:
+            QMessageBox.warning(self, "警告", "正在执行转换任务，请等待完成。")
             return
-
-        if not out_file:
-            QMessageBox.warning(self, "提示", "请指定输出 KMZ 路径！")
-            return
-
-        self.start_btn.setEnabled(False)
-        self.open_dir_btn.setEnabled(False)
+        self.tasks.clear()
+        self.table.setRowCount(0)
         self.progress_bar.setValue(0)
-        self.status_label.setText("正在准备转换...")
-        self.log(f"\n--- 开始转换 ---\n输入: {in_file}\n输出: {out_file}")
+        self.task_status_tag.setText("等待开始")
+        self.task_detail_label.setText("选择文件或拖拽 .tif 文件到列表中开始处理")
+        self.progress_ratio_label.setText("0 / 0 · 0.0%")
 
-        self.worker = ConvertWorker(
-            input_tif=in_file,
-            output_kmz=out_file,
+    def start_processing(self):
+        if not self.tasks:
+            QMessageBox.information(self, "提示", "请先添加待处理的 GeoTIFF 文件。")
+            return
+
+        if self.is_batch_running:
+            return
+
+        self.is_batch_running = True
+        self.start_btn.setEnabled(False)
+        self.add_file_btn.setEnabled(False)
+        self.clear_table_btn.setEnabled(False)
+        self.current_task_idx = 0
+        self.status_ready_label.setText("Processing")
+
+        self.process_next_task()
+
+    def process_next_task(self):
+        if self.current_task_idx >= len(self.tasks):
+            # 所有任务完成
+            self.is_batch_running = False
+            self.start_btn.setEnabled(True)
+            self.add_file_btn.setEnabled(True)
+            self.clear_table_btn.setEnabled(True)
+            self.progress_bar.setValue(100)
+            self.task_status_tag.setText("全部处理完成")
+            self.task_detail_label.setText("所有文件转换完成")
+            self.status_ready_label.setText("Ready")
+            total = len(self.tasks)
+            self.progress_ratio_label.setText(f"{total} / {total} · 100.0%")
+            self.append_log(f"批处理完成，共计 {total} 个文件。")
+            return
+
+        task = self.tasks[self.current_task_idx]
+        total = len(self.tasks)
+        current_num = self.current_task_idx + 1
+
+        self.task_status_tag.setText(f"正在处理 ({current_num}/{total})")
+        base_name = os.path.basename(task['input'])
+        self.task_detail_label.setText(f"正在转换: {base_name}")
+        self.table.setItem(self.current_task_idx, 3, QTableWidgetItem("正在处理"))
+        self.table.setItem(self.current_task_idx, 4, QTableWidgetItem("切片生成中..."))
+
+        self.append_log(f"开始切片: {base_name} -> {os.path.basename(task['output'])}")
+
+        self.worker = TaskWorker(
+            input_tif=task['input'],
+            output_kmz=task['output'],
             auto_reproject=self.chk_reproject.isChecked()
         )
-        self.worker.progress_changed.connect(self.on_progress)
-        self.worker.finished_signal.connect(self.on_finished)
+        self.worker.progress_signal.connect(self.on_task_progress)
+        self.worker.finished_signal.connect(self.on_task_finished)
         self.worker.start()
 
-    def on_progress(self, ratio: float, msg: str):
-        val = int(ratio * 100)
-        self.progress_bar.setValue(val)
-        self.status_label.setText(msg)
-        if msg:
-            self.log(f"[{val}%] {msg}")
+    def on_task_progress(self, ratio: float, msg: str):
+        # 当前子任务百分比
+        task_percent = int(ratio * 100)
+        total = len(self.tasks)
+        overall_ratio = (self.current_task_idx + ratio) / total
+        overall_percent = overall_ratio * 100
 
-    def on_finished(self, success: bool, msg: str):
-        self.start_btn.setEnabled(True)
+        self.progress_bar.setValue(int(overall_percent))
+        self.progress_ratio_label.setText(f"{self.current_task_idx} / {total} · {overall_percent:.1f}%")
+        self.table.setItem(self.current_task_idx, 4, QTableWidgetItem(f"{msg} ({task_percent}%)"))
+
+    def on_task_finished(self, success: bool, msg: str):
+        row = self.current_task_idx
         if success:
-            self.progress_bar.setValue(100)
-            self.status_label.setText("转换完成！")
-            self.open_dir_btn.setEnabled(True)
-            self.log(f"✅ {msg}")
-            QMessageBox.information(self, "完成", "KMZ 生成成功！可直接拖入 Google Earth 浏览。")
+            self.table.setItem(row, 3, QTableWidgetItem("成功"))
+            self.table.setItem(row, 4, QTableWidgetItem("已生成 KMZ"))
+            self.append_log(f"处理完成: {os.path.basename(self.tasks[row]['input'])}")
         else:
-            self.status_label.setText("转换失败")
-            self.log(f"❌ {msg}")
-            QMessageBox.critical(self, "错误", msg)
+            self.table.setItem(row, 3, QTableWidgetItem("失败"))
+            self.table.setItem(row, 4, QTableWidgetItem(msg))
+            self.append_log(f"处理失败: {os.path.basename(self.tasks[row]['input'])}, 原因: {msg}")
 
-    def open_output_folder(self):
-        out_file = self.output_edit.text().strip()
-        if out_file and os.path.exists(os.path.dirname(os.path.abspath(out_file))):
-            target_dir = os.path.dirname(os.path.abspath(out_file))
-            if sys.platform == 'win32':
-                subprocess.Popen(f'explorer /select,"{os.path.abspath(out_file)}"')
-            else:
-                subprocess.Popen(['xdg-open', target_dir])
+        self.current_task_idx += 1
+        self.process_next_task()
+
+    def on_table_double_clicked(self, index):
+        """双击表格行自动打开对应的 KMZ 所在目录并高亮选中"""
+        row = index.row()
+        if row < len(self.tasks):
+            out_file = self.tasks[row]["output"]
+            if os.path.exists(out_file):
+                if sys.platform == "win32":
+                    subprocess.Popen(f'explorer /select,"{os.path.abspath(out_file)}"')
+                else:
+                    subprocess.Popen(["xdg-open", os.path.dirname(os.path.abspath(out_file))])
 
 
 def run_cli(args):
     """CLI 命令行运行模式"""
-    print(f"[*] 模式: 命令行模式")
+    print(f"[*] 模式: 命令行批处理")
     print(f"[*] 输入文件: {args.input}")
     print(f"[*] 输出文件: {args.output}")
     print(f"[*] 自动重投影: {not args.no_warp}")
@@ -358,25 +538,23 @@ def run_cli(args):
             auto_reproject=not args.no_warp,
             progress_callback=cli_progress
         )
-        print("\n[√] 转换成功完成！")
+        print("\n[OK] 转换完成。")
     except Exception as e:
-        print(f"\n[×] 发生错误: {e}")
+        print(f"\n[ERROR] 发生错误: {e}")
         sys.exit(1)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="TIF 转 KMZ SuperOverlay 工具 (基于 GDAL)")
+    parser = argparse.ArgumentParser(description="GeoTIFF to KMZ Processor (GDAL KML SuperOverlay)")
     parser.add_argument("-i", "--input", help="输入 .tif 路径")
     parser.add_argument("-o", "--output", help="输出 .kmz 路径")
     parser.add_argument("--no-warp", action="store_true", help="禁用自动重投影 EPSG:4326")
 
     args = parser.parse_args()
 
-    # 如果指定了命令行输入参数，走 CLI 模式
     if args.input and args.output:
         run_cli(args)
     else:
-        # 否则启动 GUI 界面
         app = QApplication(sys.argv)
         window = MainWindow()
         window.show()
