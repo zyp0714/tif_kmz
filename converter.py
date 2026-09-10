@@ -158,6 +158,7 @@ def convert_tif_to_kmz(
             generate_gdal_color_file(color_entries, temp_color_file)
 
             dem_opts = gdal.DEMProcessingOptions(
+                colorFilename=temp_color_file,
                 format="GTiff",
                 addAlpha=True
             )
@@ -165,7 +166,6 @@ def convert_tif_to_kmz(
                 colored_vsi_path,
                 src_ds,
                 processing="color-relief",
-                colorFilename=temp_color_file,
                 options=dem_opts
             )
             if colored_ds is None:

@@ -116,7 +116,9 @@ def build(onedir=True):
         "main.py"
     ]
 
-    # 添加数据文件夹映射
+    # 添加数据文件夹与内置样式文件映射
+    if os.path.exists("default_subsidence.qml"):
+        cmd.append("--add-data=default_subsidence.qml;.")
     if proj_dir and os.path.exists(proj_dir):
         cmd.append(f"--add-data={proj_dir};share/proj")
     if gdal_dir and os.path.exists(gdal_dir):
@@ -145,11 +147,11 @@ def build(onedir=True):
             print(f"[+] 最终瘦身文件夹体积: {final_mb:.2f} MB")
 
         print("\n" + "=" * 60)
-        print("🎉 打包成功！")
+        print("[SUCCESS] 打包成功！")
         print(f"输出目录: {dist_path}")
         print("=" * 60)
     else:
-        print("\n❌ 打包过程中出现错误，请检查上方日志。")
+        print("\n[ERROR] 打包过程中出现错误，请检查上方日志。")
 
 if __name__ == "__main__":
     # 推荐使用 onedir 模式，避免每次双击单文件解压卡顿

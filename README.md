@@ -17,12 +17,18 @@ gdal_translate -of KMLSUPEROVERLAY -co FORMAT=PNG input.tif output.kmz
 ## 项目核心特性
 
 - **100% 官方等效**：原生调用 `osgeo.gdal.Translate`，采用 `KMLSUPEROVERLAY` 驱动与四叉树（Quadtree LOD）金字塔切片机制。
+- **单波段 InSAR 沉降自动着色（脱离 QGIS）**：
+  - 支持单波段浮点/整型栅格数据（如 InSAR 年均沉降速率、形变量、DEM 高程）。
+  - 内置标准 Sentinel-1 InSAR 沉降色阶（`-40mm` 至 `>+40mm`，`[-10, 10]` 稳定区浅绿，深红沉降，深蓝抬升）。
+  - 支持直接加载 QGIS 导出的自定义 `.qml` 样式文件。
+  - 通过 `gdal.DEMProcessing` 在内存流中直接生成带 Alpha 通道的 RGBA 彩图，切片并保留 NoData 完全透明。
 - **投影智能校准**：Google Earth 严格基于 WGS84 经纬度（EPSG:4326）。工具内置自动投影检测与内存流重投影（`gdal.Warp`），避免非 4326 投影在 Google Earth 中错位。
 - **工业级桌面交互**：
   - 支持单文件或批量多选/拖拽排队切片。
+  - 栅格属性智能感知（自动检测单波段/多波段、坐标系）。
   - 支持自定义统一输出目录，内置严格去重保护。
   - 异步多线程防界面卡死，双击结果行一键定位成果文件。
-- **免安装便携化打包**：自带 `build.py`，内置解决 GDAL C++ 运行时及 PROJ 数据字典打包丢失的痛点。
+- **免安装便携化打包**：自带 `build.py`，内置解决 GDAL C++ 运行时、PROJ 数据字典及 Intel MKL 深度瘦身（包体积优化 500MB+）。
 
 ---
 
@@ -50,12 +56,15 @@ conda activate tif_kmz
 ```bash
 python main.py
 ```
-> 点击「添加文件」或直接批量拖拽 `.tif` / `.tiff` 文件进入列表，设定输出目录后点击 **开始处理** 即可。
+> 点击「添加文件」或直接批量拖拽 `.tif` / `.tiff` 文件进入列表。单波段沉降数据可选择「[默认] InSAR 沉降标准色标」或「自定义 QML 样式文件」，设定输出目录后点击 **开始处理** 即可。
 
 ### 2. 命令行批处理 (CLI)
 ```bash
-# 单文件转换
+# 单文件转换（单波段默认自动启用内置 InSAR 沉降色标）
 python main.py -i input.tif -o output.kmz
+
+# 指定自定义 QGIS QML 样式文件
+python main.py -i input.tif -o output.kmz -q my_style.qml
 
 # 若输入影像已经是 EPSG:4326，可禁用自动重投影加速转换
 python main.py -i input.tif -o output.kmz --no-warp
@@ -77,12 +86,14 @@ python build.py
 
 ```text
 tif_kmz/
-├── .gitignore          # Git 忽略配置（过滤 dist/build、缓存、大体积栅格数据）
-├── LICENSE             # MIT 开源许可证
-├── environment.yml     # Conda 环境一键复现声明（保证跨机器 100% 可复现）
-├── requirements.txt    # Pip 依赖清单与备用说明
-├── README.md           # 项目详细说明文档
-├── converter.py        # 核心转换引擎（GDAL Translate + Warp 投影纠正）
-├── main.py             # 程序主入口（PySide6 现代桌面界面 + CLI 兼容模式）
-└── build.py            # 自动化打包脚本（处理 GDAL / PROJ 依赖注入）
+├── .gitignore               # Git 忽略配置（过滤 dist/build、缓存、大体积栅格数据）
+├── LICENSE                  # MIT 开源许可证
+├── environment.yml          # Conda 环境一键复现声明（保证跨机器 100% 可复现）
+├── requirements.txt         # Pip 依赖清单与备用说明
+├── README.md                # 项目详细说明文档
+├── default_subsidence.qml   # 内置 Sentinel-1 InSAR 标准沉降色标 (-40mm ~ +40mm)
+├── qml_parser.py            # QGIS .qml 样式解析器与 GDAL 颜色映射转换引擎
+├── converter.py             # 核心转换引擎（GDAL Translate + Warp + QML 伪彩色着色）
+├── main.py                  # 程序主入口（PySide6 现代桌面界面 + CLI 兼容模式）
+└── build.py                 # 自动化打包脚本（处理 GDAL / PROJ 依赖注入与 MKL 瘦身）
 ```

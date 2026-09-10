@@ -117,9 +117,15 @@ def generate_gdal_color_file(color_entries: List[Tuple[float, int, int, int, int
 def get_default_qml_path() -> str:
     """获取内置默认沉降样式文件的绝对路径（兼容开发环境与打包环境）"""
     if getattr(sys, 'frozen', False):
-        base_dir = getattr(sys, '_MEIPASS', os.path.dirname(sys.executable))
+        base_candidates = [
+            getattr(sys, '_MEIPASS', ''),
+            os.path.dirname(sys.executable),
+            os.path.join(os.path.dirname(sys.executable), '_internal')
+        ]
+        for b in base_candidates:
+            if b and os.path.exists(os.path.join(b, 'default_subsidence.qml')):
+                return os.path.join(b, 'default_subsidence.qml')
+        return os.path.join(getattr(sys, '_MEIPASS', os.path.dirname(sys.executable)), 'default_subsidence.qml')
     else:
         base_dir = os.path.dirname(os.path.abspath(__file__))
-
-    default_path = os.path.join(base_dir, 'default_subsidence.qml')
-    return default_path
+        return os.path.join(base_dir, 'default_subsidence.qml')
