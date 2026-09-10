@@ -51,9 +51,14 @@ def build(onedir=True):
         "--noconfirm",
         "--clean",
         "--name=tif2kmz",
-        "--windowed",  # 默认不显示黑色控制台黑框，双击直接出 UI
+        "--windowed",            # 默认不显示黑色控制台黑框，双击直接出 UI
         "--collect-all=osgeo",   # 自动收集 osgeo 所有的 c/c++ dll 和数据
-        "--collect-all=PySide6", # 自动收集 PySide6 插件及依赖
+        "--exclude-module=PySide6.QtWebEngineCore",
+        "--exclude-module=PySide6.QtWebEngineWidgets",
+        "--exclude-module=PySide6.QtWebEngineQuick",
+        "--exclude-module=PySide6.QtQml",
+        "--exclude-module=PySide6.QtQuick",
+        "--exclude-module=PySide6.Qt3DCore",
         "main.py"
     ]
 
