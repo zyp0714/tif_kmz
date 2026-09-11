@@ -87,6 +87,7 @@ class MainWindow(QMainWindow):
         self.tasks: List[Dict[str, Any]] = []
         self.current_task_idx = 0
         self.is_batch_running = False
+        self.is_batch_cancelled = False
 
         self.init_ui()
 
@@ -169,6 +170,22 @@ class MainWindow(QMainWindow):
             }
             QPushButton#primaryBtn:disabled {
                 background-color: #94a3b8;
+            }
+            QPushButton#dangerBtn {
+                background-color: #ef4444;
+                color: #ffffff;
+                font-size: 13px;
+                font-weight: 500;
+                border: none;
+                border-radius: 4px;
+                padding: 6px 16px;
+                min-height: 20px;
+            }
+            QPushButton#dangerBtn:hover {
+                background-color: #dc2626;
+            }
+            QPushButton#dangerBtn:pressed {
+                background-color: #b91c1c;
             }
             QPushButton#secondaryBtn {
                 background-color: #ffffff;
@@ -464,7 +481,7 @@ class MainWindow(QMainWindow):
         self.status_bar = QStatusBar(self)
         self.setStatusBar(self.status_bar)
         self.status_info_label = QLabel("目录: 未选择", self)
-        self.status_ready_label = QLabel("Ready", self)
+        self.status_ready_label = QLabel("就绪", self)
         self.status_bar.addWidget(self.status_info_label, 1)
         self.status_bar.addPermanentWidget(self.status_ready_label)
 
@@ -599,7 +616,7 @@ class MainWindow(QMainWindow):
                     srs_desc = "未知坐标系"
                     if gpkg_summary.layers:
                         srs_desc = gpkg_summary.layers[0].srs_desc
-                    band_count = 1
+                    band_count = 0
                     if gpkg_summary.raster_layers:
                         band_count = gpkg_summary.raster_layers[0].band_count
                     detail_text = f"包含 {len(gpkg_summary.layers)} 个图层"
@@ -652,9 +669,11 @@ class MainWindow(QMainWindow):
 
     def clear_tasks(self):
         if self.is_batch_running:
-            QMessageBox.warning(self, "警告", "正在执行转换任务，请等待完成。")
+            QMessageBox.warning(self, "警告", "正在执行转换任务，请先点击「停止处理」或等待完成。")
             return
         self.tasks.clear()
+        self.current_task_idx = 0
+        self.is_batch_cancelled = False
         self.table.setRowCount(0)
         self.progress_bar.setValue(0)
         self.task_status_tag.setText("等待开始")
@@ -662,36 +681,64 @@ class MainWindow(QMainWindow):
         self.progress_ratio_label.setText("0 / 0 · 0.0%")
 
     def start_processing(self):
+        if self.is_batch_running:
+            # 正在转换中，点击触发优雅中止
+            self.cancel_processing()
+            return
+
         if not self.tasks:
             QMessageBox.information(self, "提示", "请先添加待处理的 GeoTIFF 或 GeoPackage 文件。")
             return
 
-        if self.is_batch_running:
-            return
-
         self.is_batch_running = True
-        self.start_btn.setEnabled(False)
+        self.is_batch_cancelled = False
+        self.start_btn.setText("停止处理")
+        self.start_btn.setObjectName("dangerBtn")
+        self.start_btn.setStyleSheet("")
         self.add_file_btn.setEnabled(False)
         self.clear_table_btn.setEnabled(False)
         self.current_task_idx = 0
-        self.status_ready_label.setText("Processing")
+        self.status_ready_label.setText("正在处理...")
 
         self.process_next_task()
 
+    def cancel_processing(self):
+        """用户主动请求停止批处理"""
+        if not self.is_batch_running or self.is_batch_cancelled:
+            return
+        self.is_batch_cancelled = True
+        self.start_btn.setEnabled(False)  # 避免重复点击
+        self.task_status_tag.setText("正在停止...")
+        self.task_detail_label.setText("正在等待当前任务中止...")
+        self.append_log("用户请求停止处理，正在中止当前任务...")
+        if self.worker and self.worker.isRunning():
+            self.worker.cancel()
+
     def process_next_task(self):
-        if self.current_task_idx >= len(self.tasks):
-            # 所有任务完成
+        # 检查是否已中止或全部任务已完成
+        if self.is_batch_cancelled or self.current_task_idx >= len(self.tasks):
+            was_cancelled = self.is_batch_cancelled
             self.is_batch_running = False
+            self.is_batch_cancelled = False
+            self.start_btn.setText("开始处理")
+            self.start_btn.setObjectName("primaryBtn")
+            self.start_btn.setStyleSheet("")
             self.start_btn.setEnabled(True)
             self.add_file_btn.setEnabled(True)
             self.clear_table_btn.setEnabled(True)
-            self.progress_bar.setValue(100)
-            self.task_status_tag.setText("全部处理完成")
-            self.task_detail_label.setText("所有文件转换完成")
-            self.status_ready_label.setText("Ready")
-            total = len(self.tasks)
-            self.progress_ratio_label.setText(f"{total} / {total} · 100.0%")
-            self.append_log(f"批处理完成，共计 {total} 个文件。")
+            self.status_ready_label.setText("就绪")
+
+            if was_cancelled:
+                self.task_status_tag.setText("已停止")
+                self.task_detail_label.setText("处理已手动中止")
+                self.append_log("批处理已被用户手动中止。")
+            else:
+                self.progress_bar.setValue(100)
+                self.task_status_tag.setText("全部处理完成")
+                self.task_detail_label.setText("所有文件转换完成")
+                total = len(self.tasks)
+                self.progress_ratio_label.setText(f"{total} / {total} · 100.0%")
+                self.append_log(f"批处理完成，共计 {total} 个文件。")
             return
 
         task = self.tasks[self.current_task_idx]
@@ -702,16 +749,24 @@ class MainWindow(QMainWindow):
         base_name = os.path.basename(task['input'])
         self.task_detail_label.setText(f"正在转换: {base_name}")
         self.table.setItem(self.current_task_idx, 3, QTableWidgetItem("正在处理"))
-        self.table.setItem(self.current_task_idx, 4, QTableWidgetItem("切片生成中..."))
+        self.table.setItem(self.current_task_idx, 4, QTableWidgetItem("转换中..."))
 
-        # 决定当前任务的生效 QML
+        # 判断是否为矢量数据
+        is_vector = task.get("is_gpkg", False) and (
+            task.get("gpkg_summary") and task["gpkg_summary"].primary_category in ("vector", "mixed")
+        )
+
+        # 决定当前任务的生效 QML (仅对单波段栅格生效，不套用矢量点)
         effective_qml = None
-        if task.get("band_count", 1) == 1:
+        if not is_vector and task.get("band_count", 0) == 1:
             effective_qml = self.get_effective_qml_path()
             if effective_qml:
                 self.append_log(f"应用样式: {os.path.basename(effective_qml)} -> {base_name}")
 
-        self.append_log(f"开始切片: {base_name} -> {os.path.basename(task['output'])}")
+        if is_vector:
+            self.append_log(f"开始导出矢量要素: {base_name} -> {os.path.basename(task['output'])}")
+        else:
+            self.append_log(f"开始切片: {base_name} -> {os.path.basename(task['output'])}")
 
         self.worker = TaskWorker(
             input_tif=task['input'],
@@ -735,7 +790,11 @@ class MainWindow(QMainWindow):
 
     def on_task_finished(self, success: bool, msg: str):
         row = self.current_task_idx
-        if success:
+        if self.is_batch_cancelled:
+            self.table.setItem(row, 3, QTableWidgetItem("已中止"))
+            self.table.setItem(row, 4, QTableWidgetItem("用户手动停止"))
+            self.append_log(f"任务已中止: {os.path.basename(self.tasks[row]['input'])}")
+        elif success:
             self.table.setItem(row, 3, QTableWidgetItem("成功"))
             self.table.setItem(row, 4, QTableWidgetItem("已生成 KMZ"))
             self.append_log(f"处理完成: {os.path.basename(self.tasks[row]['input'])}")

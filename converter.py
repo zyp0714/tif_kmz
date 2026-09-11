@@ -1,7 +1,7 @@
 import os
 import sys
 import tempfile
-from typing import Callable, Optional, Dict, Any
+from typing import Callable, Optional, Dict, Any, List
 from osgeo import gdal, osr
 
 from qml_parser import parse_qml_color_ramp, generate_gdal_color_file, get_default_qml_path
@@ -232,6 +232,7 @@ def convert_vector_to_kmz(
     input_vector: str,
     output_kmz: str,
     auto_reproject: bool = True,
+    layers: Optional[List[str]] = None,
     progress_callback: Optional[Callable[[float, str], None]] = None,
     cancel_check: Optional[Callable[[], bool]] = None
 ) -> bool:
@@ -240,7 +241,8 @@ def convert_vector_to_kmz(
     支持：
     - 自动空间坐标纠偏并重投影至 EPSG:4326 (WGS84)；
     - 完整保留全部业务属性字段（点编号、沉降速率、历史形变序列等）；
-    - 在 Google Earth 中点击要素自动弹出属性表格（Schema / ExtendedData 卡片）。
+    - 在 Google Earth 中点击要素自动弹出属性表格（Schema / ExtendedData 卡片）；
+    - 支持通过 layers 参数仅导出真实空间要素图层，自动过滤 QML 元数据表 (如 layer_styles)。
     """
     setup_gdal_env()
 
@@ -267,6 +269,7 @@ def convert_vector_to_kmz(
         format="LIBKML",
         dstSRS="EPSG:4326" if auto_reproject else None,
         reproject=auto_reproject,
+        layers=layers,
         callback=ogr_progress
     )
 
@@ -302,6 +305,8 @@ def convert_geodata_to_kmz(
     # 如果是 GeoPackage 数据库文件，通过分析引擎自动分流
     if ext == ".gpkg":
         summary = analyze_gpkg(input_file)
+        spatial_layers = [vl.table_name for vl in summary.vector_layers] if summary.vector_layers else None
+
         if summary.primary_category == "vector":
             count = summary.vector_layers[0].feature_count if summary.vector_layers else 0
             if progress_callback:
@@ -310,6 +315,7 @@ def convert_geodata_to_kmz(
                 input_vector=input_file,
                 output_kmz=output_kmz,
                 auto_reproject=auto_reproject,
+                layers=spatial_layers,
                 progress_callback=progress_callback,
                 cancel_check=cancel_check
             )
@@ -347,6 +353,7 @@ def convert_geodata_to_kmz(
                 input_vector=input_file,
                 output_kmz=output_kmz,
                 auto_reproject=auto_reproject,
+                layers=spatial_layers,
                 progress_callback=progress_callback,
                 cancel_check=cancel_check
             )

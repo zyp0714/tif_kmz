@@ -155,119 +155,121 @@ def analyze_gpkg(gpkg_path: str) -> GPKGSummary:
     # 1. 采用原生 SQLite 快速安全探测元数据表 (只读连接)
     uri_path = f"file:{os.path.abspath(gpkg_path)}?mode=ro"
     conn = sqlite3.connect(uri_path, uri=True)
-    cursor = conn.cursor()
-    
-    # 检查是否有 layer_styles 表
     try:
-        cursor.execute("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='layer_styles'")
-        has_styles = cursor.fetchone()[0] > 0
-        summary.has_layer_styles_table = has_styles
-        if has_styles:
-            cursor.execute("SELECT count(*) FROM layer_styles")
-            summary.embedded_styles_count = cursor.fetchone()[0]
-    except Exception:
-        pass
+        cursor = conn.cursor()
         
-    # 查询 gpkg_contents 核心图层注册表
-    try:
-        cursor.execute("""
-            SELECT table_name, data_type, identifier, description, srs_id, min_x, min_y, max_x, max_y
-            FROM gpkg_contents
-        """)
-        contents_rows = cursor.fetchall()
-    except Exception:
-        contents_rows = []
-        
-    for row in contents_rows:
-        t_name, d_type, ident, desc, srs_id, min_x, min_y, max_x, max_y = row
-        d_type_lower = (d_type or "").lower()
-        
-        srs_desc, is_wgs84 = _query_srs_description(cursor, srs_id)
-        has_qml, qml_content = _check_embedded_qml(cursor, t_name)
-        
-        bounds = (
-            float(min_x or 0.0),
-            float(min_y or 0.0),
-            float(max_x or 0.0),
-            float(max_y or 0.0)
-        )
-        
-        layer_info = GPKGLayerInfo(
-            table_name=t_name,
-            category="unknown",
-            raw_data_type=d_type,
-            identifier=ident or t_name,
-            description=desc or "",
-            srs_id=srs_id or 0,
-            srs_desc=srs_desc,
-            is_wgs84=is_wgs84,
-            bounds=bounds,
-            has_embedded_qml=has_qml,
-            embedded_qml_content=qml_content
-        )
-        
-        # A. 栅格类型判断: tiles 或 2d-gridded-coverage
-        if "tile" in d_type_lower or "coverage" in d_type_lower or "grid" in d_type_lower:
-            layer_info.category = "raster"
-            # 进一步通过 GDAL 探查切片尺寸与波段数
-            try:
-                ds = gdal.Open(f"GPKG:{gpkg_path}:{t_name}", gdal.GA_ReadOnly)
-                if ds:
-                    layer_info.raster_width = ds.RasterXSize
-                    layer_info.raster_height = ds.RasterYSize
-                    layer_info.band_count = ds.RasterCount
-                    ds = None
-            except Exception:
-                # 兼容直接通过主库打开
+        # 检查是否有 layer_styles 表
+        try:
+            cursor.execute("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='layer_styles'")
+            has_styles = cursor.fetchone()[0] > 0
+            summary.has_layer_styles_table = has_styles
+            if has_styles:
+                cursor.execute("SELECT count(*) FROM layer_styles")
+                summary.embedded_styles_count = cursor.fetchone()[0]
+        except Exception:
+            pass
+            
+        # 查询 gpkg_contents 核心图层注册表
+        try:
+            cursor.execute("""
+                SELECT table_name, data_type, identifier, description, srs_id, min_x, min_y, max_x, max_y
+                FROM gpkg_contents
+            """)
+            contents_rows = cursor.fetchall()
+        except Exception:
+            contents_rows = []
+            
+        for row in contents_rows:
+            t_name, d_type, ident, desc, srs_id, min_x, min_y, max_x, max_y = row
+            d_type_lower = (d_type or "").lower()
+            
+            srs_desc, is_wgs84 = _query_srs_description(cursor, srs_id)
+            has_qml, qml_content = _check_embedded_qml(cursor, t_name)
+            
+            bounds = (
+                float(min_x or 0.0),
+                float(min_y or 0.0),
+                float(max_x or 0.0),
+                float(max_y or 0.0)
+            )
+            
+            layer_info = GPKGLayerInfo(
+                table_name=t_name,
+                category="unknown",
+                raw_data_type=d_type,
+                identifier=ident or t_name,
+                description=desc or "",
+                srs_id=srs_id or 0,
+                srs_desc=srs_desc,
+                is_wgs84=is_wgs84,
+                bounds=bounds,
+                has_embedded_qml=has_qml,
+                embedded_qml_content=qml_content
+            )
+            
+            # A. 栅格类型判断: tiles 或 2d-gridded-coverage
+            if "tile" in d_type_lower or "coverage" in d_type_lower or "grid" in d_type_lower:
+                layer_info.category = "raster"
+                # 进一步通过 GDAL 探查切片尺寸与波段数
                 try:
-                    ds = gdal.Open(gpkg_path, gdal.GA_ReadOnly)
+                    ds = gdal.Open(f"GPKG:{gpkg_path}:{t_name}", gdal.GA_ReadOnly)
                     if ds:
                         layer_info.raster_width = ds.RasterXSize
                         layer_info.raster_height = ds.RasterYSize
                         layer_info.band_count = ds.RasterCount
                         ds = None
                 except Exception:
+                    # 兼容直接通过主库打开
+                    try:
+                        ds = gdal.Open(gpkg_path, gdal.GA_ReadOnly)
+                        if ds:
+                            layer_info.raster_width = ds.RasterXSize
+                            layer_info.raster_height = ds.RasterYSize
+                            layer_info.band_count = ds.RasterCount
+                            ds = None
+                    except Exception:
+                        pass
+                summary.raster_layers.append(layer_info)
+                
+            # B. 矢量类型判断: features
+            elif "feature" in d_type_lower:
+                layer_info.category = "vector"
+                # 查询 gpkg_geometry_columns 获取具体几何类型 (Point/Line/Polygon)
+                try:
+                    cursor.execute(
+                        "SELECT geometry_type_name FROM gpkg_geometry_columns WHERE table_name = ?",
+                        (t_name,)
+                    )
+                    geom_row = cursor.fetchone()
+                    if geom_row and geom_row[0]:
+                        layer_info.geom_type = geom_row[0].upper()
+                except Exception:
                     pass
-            summary.raster_layers.append(layer_info)
-            
-        # B. 矢量类型判断: features
-        elif "feature" in d_type_lower:
-            layer_info.category = "vector"
-            # 查询 gpkg_geometry_columns 获取具体几何类型 (Point/Line/Polygon)
-            try:
-                cursor.execute(
-                    "SELECT geometry_type_name FROM gpkg_geometry_columns WHERE table_name = ?",
-                    (t_name,)
-                )
-                geom_row = cursor.fetchone()
-                if geom_row and geom_row[0]:
-                    layer_info.geom_type = geom_row[0].upper()
-            except Exception:
-                pass
+                    
+                # 统计要素总行数
+                try:
+                    cursor.execute(f'SELECT count(*) FROM "{t_name}"')
+                    layer_info.feature_count = cursor.fetchone()[0]
+                except Exception:
+                    pass
+                    
+                # 获取字段列表
+                try:
+                    cursor.execute(f'PRAGMA table_info("{t_name}")')
+                    cols = cursor.fetchall()
+                    layer_info.fields = [c[1] for c in cols if c[1] != "geom" and c[1] != "geometry"]
+                except Exception:
+                    pass
+                    
+                summary.vector_layers.append(layer_info)
                 
-            # 统计要素总行数
-            try:
-                cursor.execute(f'SELECT count(*) FROM "{t_name}"')
-                layer_info.feature_count = cursor.fetchone()[0]
-            except Exception:
-                pass
+            # C. 纯属性表
+            elif "attribute" in d_type_lower:
+                layer_info.category = "attribute"
+                summary.attribute_layers.append(layer_info)
                 
-            # 获取字段列表
-            try:
-                cursor.execute(f'PRAGMA table_info("{t_name}")')
-                cols = cursor.fetchall()
-                layer_info.fields = [c[1] for c in cols if c[1] != "geom" and c[1] != "geometry"]
-            except Exception:
-                pass
-                
-            summary.vector_layers.append(layer_info)
-            
-        # C. 纯属性表
-        elif "attribute" in d_type_lower:
-            layer_info.category = "attribute"
-            summary.attribute_layers.append(layer_info)
-            
-        summary.layers.append(layer_info)
+            summary.layers.append(layer_info)
+    finally:
+        conn.close()
         
-    conn.close()
     return summary
