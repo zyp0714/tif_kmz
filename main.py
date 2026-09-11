@@ -64,6 +64,9 @@ class TaskWorker(QThread):
 
     def run(self):
         try:
+            if self._is_cancelled:
+                self.finished_signal.emit(False, "任务已中止")
+                return
             success = convert_geodata_to_kmz(
                 input_file=self.input_tif,
                 output_kmz=self.output_kmz,
@@ -72,12 +75,17 @@ class TaskWorker(QThread):
                 progress_callback=lambda ratio, msg: self.progress_signal.emit(ratio, msg),
                 cancel_check=lambda: self._is_cancelled
             )
-            if success:
+            if self._is_cancelled:
+                self.finished_signal.emit(False, "任务已中止")
+            elif success:
                 self.finished_signal.emit(True, "处理完成")
             else:
-                self.finished_signal.emit(False, "任务已中止")
+                self.finished_signal.emit(False, "任务已中止" if self._is_cancelled else "转换失败")
         except Exception as e:
-            self.finished_signal.emit(False, f"错误: {str(e)}")
+            if self._is_cancelled:
+                self.finished_signal.emit(False, "任务已中止")
+            else:
+                self.finished_signal.emit(False, f"错误: {str(e)}")
 
 
 class MainWindow(QMainWindow):
@@ -661,7 +669,10 @@ class MainWindow(QMainWindow):
             self.table.setItem(row, 4, QTableWidgetItem(detail_text))
 
         total = len(self.tasks)
-        self.progress_ratio_label.setText(f"0 / {total} · 0.0%")
+        completed_count = sum(1 for t in self.tasks if t.get("status") == "成功")
+        ratio = (completed_count / total) if total > 0 else 0.0
+        self.progress_bar.setValue(int(ratio * 100))
+        self.progress_ratio_label.setText(f"{completed_count} / {total} · {ratio * 100:.1f}%")
         if has_custom:
             self.status_info_label.setText(f"输出目录: {custom_dir}")
         elif file_paths:
@@ -690,6 +701,31 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "提示", "请先添加待处理的 GeoTIFF 或 GeoPackage 文件。")
             return
 
+        # 检查断点续传：寻找第一个未成功完成的任务
+        first_uncompleted_idx = -1
+        for idx, task in enumerate(self.tasks):
+            if task.get("status") != "成功":
+                first_uncompleted_idx = idx
+                break
+
+        # 如果列表中所有任务都已标记为成功，询问用户是否全部重新转换
+        if first_uncompleted_idx == -1:
+            reply = QMessageBox.question(
+                self,
+                "提示",
+                "列表中的所有文件均已转换成功。\n是否要全部重新开始转换？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply == QMessageBox.Yes:
+                for idx, task in enumerate(self.tasks):
+                    task["status"] = "等待处理"
+                    self.table.setItem(idx, 3, QTableWidgetItem("等待处理"))
+                    self.table.setItem(idx, 4, QTableWidgetItem(task.get("detail", "-")))
+                first_uncompleted_idx = 0
+            else:
+                return
+
         self.is_batch_running = True
         self.is_batch_cancelled = False
         self.start_btn.setText("停止处理")
@@ -697,8 +733,14 @@ class MainWindow(QMainWindow):
         self.start_btn.setStyleSheet("")
         self.add_file_btn.setEnabled(False)
         self.clear_table_btn.setEnabled(False)
-        self.current_task_idx = 0
+        self.current_task_idx = first_uncompleted_idx
         self.status_ready_label.setText("正在处理...")
+
+        total = len(self.tasks)
+        completed_count = sum(1 for t in self.tasks if t.get("status") == "成功")
+        initial_ratio = (completed_count / total) if total > 0 else 0.0
+        self.progress_bar.setValue(int(initial_ratio * 100))
+        self.progress_ratio_label.setText(f"{completed_count} / {total} · {initial_ratio * 100:.1f}%")
 
         self.process_next_task()
 
@@ -713,8 +755,14 @@ class MainWindow(QMainWindow):
         self.append_log("用户请求停止处理，正在中止当前任务...")
         if self.worker and self.worker.isRunning():
             self.worker.cancel()
+        else:
+            self.process_next_task()
 
     def process_next_task(self):
+        # 跳过已经成功的任务，定位到下一个未完成任务
+        while self.current_task_idx < len(self.tasks) and self.tasks[self.current_task_idx].get("status") == "成功":
+            self.current_task_idx += 1
+
         # 检查是否已中止或全部任务已完成
         if self.is_batch_cancelled or self.current_task_idx >= len(self.tasks):
             was_cancelled = self.is_batch_cancelled
@@ -728,16 +776,19 @@ class MainWindow(QMainWindow):
             self.clear_table_btn.setEnabled(True)
             self.status_ready_label.setText("就绪")
 
+            total = len(self.tasks)
+            completed_count = sum(1 for t in self.tasks if t.get("status") == "成功")
+            ratio = (completed_count / total) if total > 0 else 0.0
+            self.progress_bar.setValue(int(ratio * 100))
+            self.progress_ratio_label.setText(f"{completed_count} / {total} · {ratio * 100:.1f}%")
+
             if was_cancelled:
                 self.task_status_tag.setText("已停止")
-                self.task_detail_label.setText("处理已手动中止")
-                self.append_log("批处理已被用户手动中止。")
+                self.task_detail_label.setText(f"批处理已手动中止 (已完成 {completed_count}/{total})")
+                self.append_log(f"批处理已被用户手动中止，当前完成 {completed_count}/{total} 个文件。")
             else:
-                self.progress_bar.setValue(100)
                 self.task_status_tag.setText("全部处理完成")
                 self.task_detail_label.setText("所有文件转换完成")
-                total = len(self.tasks)
-                self.progress_ratio_label.setText(f"{total} / {total} · 100.0%")
                 self.append_log(f"批处理完成，共计 {total} 个文件。")
             return
 
@@ -781,27 +832,32 @@ class MainWindow(QMainWindow):
     def on_task_progress(self, ratio: float, msg: str):
         task_percent = int(ratio * 100)
         total = len(self.tasks)
-        overall_ratio = (self.current_task_idx + ratio) / total
+        completed_count = sum(1 for idx, t in enumerate(self.tasks) if t.get("status") == "成功" and idx != self.current_task_idx)
+        overall_ratio = (completed_count + ratio) / total if total > 0 else 0.0
         overall_percent = overall_ratio * 100
 
         self.progress_bar.setValue(int(overall_percent))
-        self.progress_ratio_label.setText(f"{self.current_task_idx} / {total} · {overall_percent:.1f}%")
+        self.progress_ratio_label.setText(f"{completed_count} / {total} · {overall_percent:.1f}%")
         self.table.setItem(self.current_task_idx, 4, QTableWidgetItem(f"{msg} ({task_percent}%)"))
 
     def on_task_finished(self, success: bool, msg: str):
         row = self.current_task_idx
-        if self.is_batch_cancelled:
-            self.table.setItem(row, 3, QTableWidgetItem("已中止"))
-            self.table.setItem(row, 4, QTableWidgetItem("用户手动停止"))
-            self.append_log(f"任务已中止: {os.path.basename(self.tasks[row]['input'])}")
-        elif success:
-            self.table.setItem(row, 3, QTableWidgetItem("成功"))
-            self.table.setItem(row, 4, QTableWidgetItem("已生成 KMZ"))
-            self.append_log(f"处理完成: {os.path.basename(self.tasks[row]['input'])}")
-        else:
-            self.table.setItem(row, 3, QTableWidgetItem("失败"))
-            self.table.setItem(row, 4, QTableWidgetItem(msg))
-            self.append_log(f"处理失败: {os.path.basename(self.tasks[row]['input'])}, 原因: {msg}")
+        if 0 <= row < len(self.tasks):
+            if self.is_batch_cancelled:
+                self.tasks[row]["status"] = "已中止"
+                self.table.setItem(row, 3, QTableWidgetItem("已中止"))
+                self.table.setItem(row, 4, QTableWidgetItem("用户手动停止"))
+                self.append_log(f"任务已中止: {os.path.basename(self.tasks[row]['input'])}")
+            elif success:
+                self.tasks[row]["status"] = "成功"
+                self.table.setItem(row, 3, QTableWidgetItem("成功"))
+                self.table.setItem(row, 4, QTableWidgetItem("已生成 KMZ"))
+                self.append_log(f"处理完成: {os.path.basename(self.tasks[row]['input'])}")
+            else:
+                self.tasks[row]["status"] = "失败"
+                self.table.setItem(row, 3, QTableWidgetItem("失败"))
+                self.table.setItem(row, 4, QTableWidgetItem(msg))
+                self.append_log(f"处理失败: {os.path.basename(self.tasks[row]['input'])}, 原因: {msg}")
 
         self.current_task_idx += 1
         self.process_next_task()
@@ -865,10 +921,14 @@ class MainWindow(QMainWindow):
         elif self.is_batch_running:
             cur_num = self.current_task_idx + 1
             self.task_status_tag.setText(f"正在处理 ({cur_num}/{total})")
-            task_ratio = self.current_task_idx / total
-            self.progress_ratio_label.setText(f"{self.current_task_idx} / {total} · {task_ratio*100:.1f}%")
+            completed_count = sum(1 for idx, t in enumerate(self.tasks) if t.get("status") == "成功" and idx != self.current_task_idx)
+            task_ratio = completed_count / total if total > 0 else 0.0
+            self.progress_ratio_label.setText(f"{completed_count} / {total} · {task_ratio*100:.1f}%")
         else:
-            self.progress_ratio_label.setText(f"0 / {total} · 0.0%")
+            completed_count = sum(1 for t in self.tasks if t.get("status") == "成功")
+            ratio = (completed_count / total) if total > 0 else 0.0
+            self.progress_bar.setValue(int(ratio * 100))
+            self.progress_ratio_label.setText(f"{completed_count} / {total} · {ratio*100:.1f}%")
 
         if removed_count > 0:
             self.append_log(f"已从任务列表中移除 {removed_count} 项。")

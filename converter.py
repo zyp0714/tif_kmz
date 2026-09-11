@@ -144,12 +144,16 @@ def convert_tif_to_kmz(
 
     warp_temp_ds = None
     vsimem_path = f"/vsimem/warp_temp_{os.getpid()}.tif"
+    out_ds = None
 
     try:
         working_ds = src_ds
 
         # 1. 检查是否需要应用 QML 进行单波段伪彩色着色
         if src_ds.RasterCount == 1 and qml_path and os.path.exists(qml_path):
+            if cancel_check and cancel_check():
+                return False
+
             if progress_callback:
                 progress_callback(0.04, f"检测到单波段数据，正在应用 QML 色标渲染: {os.path.basename(qml_path)}...")
 
@@ -161,7 +165,8 @@ def convert_tif_to_kmz(
             dem_opts = gdal.DEMProcessingOptions(
                 colorFilename=temp_color_file,
                 format="GTiff",
-                addAlpha=True
+                addAlpha=True,
+                callback=gdal_progress
             )
             colored_ds = gdal.DEMProcessing(
                 colored_vsi_path,
@@ -169,12 +174,17 @@ def convert_tif_to_kmz(
                 processing="color-relief",
                 options=dem_opts
             )
+            if cancel_check and cancel_check():
+                return False
             if colored_ds is None:
                 raise RuntimeError(f"QML 样式伪彩色渲染失败，请检查样式与数据是否匹配。")
 
             working_ds = colored_ds
 
         # 2. 检查是否需要重投影
+        if cancel_check and cancel_check():
+            return False
+
         need_reproject = auto_reproject and not is_wgs84(working_ds)
         if need_reproject:
             if progress_callback:
@@ -183,14 +193,20 @@ def convert_tif_to_kmz(
             warp_options = gdal.WarpOptions(
                 dstSRS="EPSG:4326",
                 resampleAlg=gdal.GRA_Bilinear,
-                format="GTiff"
+                format="GTiff",
+                callback=gdal_progress
             )
             warp_temp_ds = gdal.Warp(vsimem_path, working_ds, options=warp_options)
+            if cancel_check and cancel_check():
+                return False
             if warp_temp_ds is None:
                 raise RuntimeError("自动重投影 (EPSG:4326) 失败")
             working_ds = warp_temp_ds
 
         # 3. 执行 Translate 切片 SuperOverlay
+        if cancel_check and cancel_check():
+            return False
+
         if progress_callback:
             progress_callback(0.12, "开始生成 KML SuperOverlay 金字塔瓦片 (PNG)...")
 
@@ -201,6 +217,8 @@ def convert_tif_to_kmz(
         )
 
         out_ds = gdal.Translate(output_kmz, working_ds, options=translate_options)
+        if cancel_check and cancel_check():
+            return False
         if out_ds is None:
             raise RuntimeError("KMZ 生成失败，请检查数据完整性或是否手动中止。")
 
@@ -213,6 +231,8 @@ def convert_tif_to_kmz(
 
     finally:
         # 清理临时内存与句柄
+        out_ds = None
+        working_ds = None
         if warp_temp_ds is not None:
             warp_temp_ds = None
             gdal.Unlink(vsimem_path)
@@ -226,6 +246,13 @@ def convert_tif_to_kmz(
                 pass
         if src_ds is not None:
             src_ds = None
+
+        # 若中途手动中止，自动清理未完成的残余文件
+        if cancel_check and cancel_check() and os.path.exists(output_kmz):
+            try:
+                os.remove(output_kmz)
+            except Exception:
+                pass
 
 
 def convert_vector_to_kmz(
@@ -242,12 +269,16 @@ def convert_vector_to_kmz(
     - 自动空间坐标纠偏并重投影至 EPSG:4326 (WGS84)；
     - 完整保留全部业务属性字段（点编号、沉降速率、历史形变序列等）；
     - 在 Google Earth 中点击要素自动弹出属性表格（Schema / ExtendedData 卡片）；
-    - 支持通过 layers 参数仅导出真实空间要素图层，自动过滤 QML 元数据表 (如 layer_styles)。
+    - 支持通过 layers 参数仅导出真实空间要素图层，自动过滤 QML 元数据表 (如 layer_styles)；
+    - 支持 cancel_check 秒级平滑中断。
     """
     setup_gdal_env()
 
     if not os.path.exists(input_vector):
         raise FileNotFoundError(f"输入文件不存在: {input_vector}")
+
+    if cancel_check and cancel_check():
+        return False
 
     out_dir = os.path.dirname(os.path.abspath(output_kmz))
     if out_dir and not os.path.exists(out_dir):
@@ -273,14 +304,25 @@ def convert_vector_to_kmz(
         callback=ogr_progress
     )
 
-    out_ds = gdal.VectorTranslate(output_kmz, input_vector, options=vt_options)
-    if out_ds is None:
-        raise RuntimeError(f"矢量数据转换为 KMZ 失败: {os.path.basename(input_vector)}")
     out_ds = None
+    try:
+        out_ds = gdal.VectorTranslate(output_kmz, input_vector, options=vt_options)
+        if cancel_check and cancel_check():
+            return False
+        if out_ds is None:
+            raise RuntimeError(f"矢量数据转换为 KMZ 失败: {os.path.basename(input_vector)}")
+        out_ds = None
 
-    if progress_callback:
-        progress_callback(1.0, "矢量要素导出完成，KMZ 文件已生成。")
-    return True
+        if progress_callback:
+            progress_callback(1.0, "矢量要素导出完成，KMZ 文件已生成。")
+        return True
+    finally:
+        out_ds = None
+        if cancel_check and cancel_check() and os.path.exists(output_kmz):
+            try:
+                os.remove(output_kmz)
+            except Exception:
+                pass
 
 
 def convert_geodata_to_kmz(
