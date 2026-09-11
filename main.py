@@ -90,7 +90,7 @@ class MainWindow(QMainWindow):
         self.init_ui()
 
     def init_ui(self):
-        self.setWindowTitle("GeoTIFF to KMZ Processor")
+        self.setWindowTitle("GeoKMZ")
         self.setWindowIcon(get_app_icon())
         self.resize(1000, 700)
         self.setMinimumSize(880, 600)
@@ -249,7 +249,7 @@ class MainWindow(QMainWindow):
         header_layout.setSpacing(12)
 
         title_layout = QVBoxLayout()
-        title_label = QLabel("GeoTIFF to KMZ Processor", self)
+        title_label = QLabel("GeoKMZ", self)
         title_label.setObjectName("headerTitle")
         title_layout.addWidget(title_label)
 
@@ -791,8 +791,8 @@ def run_cli(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="GeoTIFF to KMZ Processor (GDAL KML SuperOverlay)")
-    parser.add_argument("-i", "--input", help="输入 .tif 路径")
+    parser = argparse.ArgumentParser(description="GeoKMZ - Geographic Data (TIF / GPKG) to KMZ Converter")
+    parser.add_argument("-i", "--input", help="输入 .tif 或 .gpkg 路径")
     parser.add_argument("-o", "--output", help="输出 .kmz 路径")
     parser.add_argument("-q", "--qml", help="可选 QML 样式文件路径 (对单波段生效，留空默认使用内置沉降色标)")
     parser.add_argument("--no-warp", action="store_true", help="禁用自动重投影 EPSG:4326")
@@ -806,7 +806,7 @@ def main():
         if sys.platform == "win32":
             try:
                 import ctypes
-                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("geobridge.tif2kmz.app.1.0")
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("geokmz.app.1.0")
             except Exception:
                 pass
 

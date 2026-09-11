@@ -82,11 +82,12 @@ def build(onedir=True):
     """
     # 1. 确保之前运行的测试进程已关闭，防止文件写入冲突
     if sys.platform == "win32":
+        subprocess.run(["taskkill", "/f", "/im", "GeoKMZ.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         subprocess.run(["taskkill", "/f", "/im", "tif2kmz.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     proj_dir, gdal_dir = find_data_dirs()
     print("=" * 60)
-    print("正在准备打包 TIF 转 KMZ SuperOverlay 工具...")
+    print("正在准备打包 GeoKMZ 转换工具...")
     print(f"[*] Python 路径: {sys.executable}")
     print(f"[*] PROJ 数据目录: {proj_dir if proj_dir else '未找到(将尝试使用默认系统配置)'}")
     print(f"[*] GDAL 数据目录: {gdal_dir if gdal_dir else '未找到(将尝试使用默认系统配置)'}")
@@ -96,7 +97,7 @@ def build(onedir=True):
         sys.executable, "-m", "PyInstaller",
         "--noconfirm",
         "--clean",
-        "--name=tif2kmz",
+        "--name=GeoKMZ",
         "--windowed",            # 默认不显示黑色控制台黑框，双击直接出 UI
         "--collect-all=osgeo",   # 自动收集 osgeo 所有的 c/c++ dll 和数据
         # 排除无用的 Qt 大模块 (瘦身约 100MB)
@@ -142,7 +143,7 @@ def build(onedir=True):
 
     ret = subprocess.run(cmd)
     if ret.returncode == 0:
-        dist_path = os.path.abspath(os.path.join("dist", "tif2kmz"))
+        dist_path = os.path.abspath(os.path.join("dist", "GeoKMZ"))
 
         # 执行针对 Intel MKL 的深度瘦身规则
         if onedir and os.path.exists(dist_path):

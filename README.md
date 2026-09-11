@@ -1,11 +1,11 @@
-# GeoTIFF to KMZ SuperOverlay Converter
+# GeoKMZ - 地理数据转 KMZ SuperOverlay 转换工具
 
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/)
 [![GDAL](https://img.shields.io/badge/GDAL-3.8%2B-brightgreen.svg)](https://gdal.org/)
 [![PySide6](https://img.shields.io/badge/GUI-PySide6-green.svg)](https://doc.qt.io/qtforpython/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-一个基于 **Python + GDAL + PySide6** 的高性能遥感影像金字塔切片与 Google Earth KMZ 转换工具。
+**GeoKMZ** 是一个基于 **Python + GDAL + PySide6** 的高性能地理数据（TIF 影像栅格 / GPKG 矢量点面）与 Google Earth KMZ 金字塔/多层级矢量转换工具。
 
 该项目完整实现了 QGIS / OSGeo4W Shell 命令的等效功能：
 ```bash
@@ -78,7 +78,7 @@ python main.py -i input.tif -o output.kmz --no-warp
 ```bash
 python build.py
 ```
-打包完成后，可在 `dist/tif2kmz/` 目录下得到 `tif2kmz.exe` 绿色免安装运行文件夹，可直接打包拷贝到任何没有安装 Python、QGIS 或 Conda 的 Windows 机器上直接运行。
+打包完成后，可在 `dist/GeoKMZ/` 目录下得到 `GeoKMZ.exe` 绿色免安装运行文件夹，可直接打包拷贝到任何没有安装 Python、QGIS 或 Conda 的 Windows 机器上直接运行。
 
 ---
 
