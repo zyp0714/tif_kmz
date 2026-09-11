@@ -5,14 +5,15 @@ import subprocess
 from datetime import datetime
 from typing import Optional, List, Dict
 
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, Signal, QEvent
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QProgressBar, QTextEdit, QTableWidget,
     QTableWidgetItem, QHeaderView, QFileDialog, QCheckBox,
-    QMessageBox, QFrame, QStatusBar, QLineEdit, QComboBox
+    QMessageBox, QFrame, QStatusBar, QLineEdit, QComboBox,
+    QMenu
 )
-from PySide6.QtGui import QFont, QDragEnterEvent, QDropEvent, QIcon, QPixmap
+from PySide6.QtGui import QFont, QDragEnterEvent, QDropEvent, QIcon, QPixmap, QAction, QGuiApplication
 from osgeo import gdal, osr
 
 from converter import convert_tif_to_kmz, is_wgs84, setup_gdal_env, get_raster_metadata, convert_geodata_to_kmz
@@ -236,6 +237,30 @@ class MainWindow(QMainWindow):
                 font-size: 11px;
                 color: #64748b;
             }
+            QMenu {
+                background-color: #ffffff;
+                border: 1px solid #cbd5e1;
+                border-radius: 6px;
+                padding: 4px;
+            }
+            QMenu::item {
+                padding: 6px 20px 6px 12px;
+                font-size: 12px;
+                color: #1e293b;
+                border-radius: 4px;
+            }
+            QMenu::item:selected {
+                background-color: #f1f5f9;
+                color: #0f172a;
+            }
+            QMenu::item:disabled {
+                color: #94a3b8;
+            }
+            QMenu::separator {
+                height: 1px;
+                background-color: #e2e8f0;
+                margin: 4px 6px;
+            }
         """)
 
         central_widget = QWidget(self)
@@ -398,9 +423,13 @@ class MainWindow(QMainWindow):
         self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.ExtendedSelection)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self.show_table_context_menu)
         self.table.doubleClicked.connect(self.on_table_double_clicked)
+        self.table.installEventFilter(self)
         result_layout.addWidget(self.table)
 
         main_layout.addWidget(result_frame, 3)
@@ -718,16 +747,130 @@ class MainWindow(QMainWindow):
         self.current_task_idx += 1
         self.process_next_task()
 
+    def locate_task_file(self, row: int, target: str = "output"):
+        """在文件资源管理器中定位并高亮选中文件"""
+        if row < 0 or row >= len(self.tasks):
+            return
+        task = self.tasks[row]
+        file_path = task["output"] if target == "output" else task["input"]
+        target_name = "KMZ 成果" if target == "output" else "源文件"
+        if not os.path.exists(file_path):
+            QMessageBox.information(self, "提示", f"该{target_name}尚未生成或已被移除：\n{file_path}")
+            return
+        abs_path = os.path.abspath(file_path)
+        if sys.platform == "win32":
+            subprocess.Popen(f'explorer /select,"{abs_path}"')
+        else:
+            subprocess.Popen(["xdg-open", os.path.dirname(abs_path)])
+
+    def copy_path_to_clipboard(self, path: str, desc: str):
+        """将文件路径复制到系统剪贴板"""
+        clipboard = QGuiApplication.clipboard()
+        clipboard.setText(path)
+        self.append_log(f"已复制{desc}路径: {path}")
+
+    def remove_selected_tasks(self):
+        """从任务列表中移除选中的项 (支持多选和 Delete 快捷键)"""
+        if self.is_batch_running:
+            QMessageBox.warning(self, "警告", "正在执行转换任务，请等待批处理完成或稍后再移除。")
+            return
+
+        selected_indexes = self.table.selectedIndexes()
+        if not selected_indexes:
+            return
+
+        selected_rows = sorted(list(set(idx.row() for idx in selected_indexes)), reverse=True)
+        if not selected_rows:
+            return
+
+        for r in selected_rows:
+            if r < len(self.tasks):
+                del self.tasks[r]
+                self.table.removeRow(r)
+
+        total = len(self.tasks)
+        self.progress_ratio_label.setText(f"0 / {total} · 0.0%")
+        if total == 0:
+            self.task_status_tag.setText("等待开始")
+            self.task_detail_label.setText("选择文件或拖拽 .tif / .gpkg 文件到列表中开始处理")
+            self.progress_bar.setValue(0)
+        self.append_log(f"已从任务列表中移除 {len(selected_rows)} 项。")
+
+    def show_table_context_menu(self, pos):
+        """弹出任务列表右键上下文菜单"""
+        item = self.table.itemAt(pos)
+        if item:
+            clicked_row = item.row()
+            current_selected = [idx.row() for idx in self.table.selectedIndexes()]
+            if clicked_row not in current_selected:
+                self.table.selectRow(clicked_row)
+
+        selected_indexes = self.table.selectedIndexes()
+        if not selected_indexes:
+            return
+
+        selected_rows = sorted(list(set(idx.row() for idx in selected_indexes)))
+        if not selected_rows:
+            return
+
+        first_row = selected_rows[0]
+        if first_row >= len(self.tasks):
+            return
+
+        task = self.tasks[first_row]
+        out_file = task["output"]
+        in_file = task["input"]
+        kmz_exists = os.path.exists(out_file)
+        src_exists = os.path.exists(in_file)
+
+        menu = QMenu(self)
+
+        # 1. 定位 KMZ 成果
+        locate_kmz_action = menu.addAction("定位 KMZ 成果")
+        locate_kmz_action.setEnabled(kmz_exists)
+        locate_kmz_action.triggered.connect(lambda: self.locate_task_file(first_row, target="output"))
+
+        # 2. 定位原始输入文件
+        locate_src_action = menu.addAction("定位原始输入文件")
+        locate_src_action.setEnabled(src_exists)
+        locate_src_action.triggered.connect(lambda: self.locate_task_file(first_row, target="input"))
+
+        menu.addSeparator()
+
+        # 4. 复制路径（二级子菜单）
+        copy_menu = menu.addMenu("复制路径")
+        copy_src_action = copy_menu.addAction("复制输入文件路径")
+        copy_src_action.triggered.connect(lambda: self.copy_path_to_clipboard(in_file, "输入文件"))
+        copy_out_action = copy_menu.addAction("复制输出 KMZ 路径")
+        copy_out_action.triggered.connect(lambda: self.copy_path_to_clipboard(out_file, "输出 KMZ"))
+
+        menu.addSeparator()
+
+        # 3. 列表中移除此项 (支持多选及 Delete 快捷键)
+        count_str = f" ({len(selected_rows)} 项)" if len(selected_rows) > 1 else ""
+        remove_action = menu.addAction(f"从列表中移除{count_str}\tDel")
+        remove_action.setEnabled(not self.is_batch_running)
+        remove_action.triggered.connect(self.remove_selected_tasks)
+
+        menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    def eventFilter(self, source, event):
+        """拦截表格按键事件，响应 Delete 键删除任务"""
+        if source == self.table and event.type() == QEvent.KeyPress:
+            if event.key() == Qt.Key_Delete:
+                self.remove_selected_tasks()
+                return True
+        return super().eventFilter(source, event)
+
     def on_table_double_clicked(self, index):
-        """双击表格行自动打开对应的 KMZ 所在目录并高亮选中"""
+        """双击表格行自动定位成果或源文件"""
         row = index.row()
         if row < len(self.tasks):
             out_file = self.tasks[row]["output"]
             if os.path.exists(out_file):
-                if sys.platform == "win32":
-                    subprocess.Popen(f'explorer /select,"{os.path.abspath(out_file)}"')
-                else:
-                    subprocess.Popen(["xdg-open", os.path.dirname(os.path.abspath(out_file))])
+                self.locate_task_file(row, target="output")
+            else:
+                self.locate_task_file(row, target="input")
 
     def showEvent(self, event):
         super().showEvent(event)
