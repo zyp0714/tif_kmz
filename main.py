@@ -1,8 +1,9 @@
 import os
 import sys
 import argparse
+import uuid
 from datetime import datetime
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 
 from PySide6.QtCore import Qt, QThread, Signal, QEvent
 from PySide6.QtWidgets import (
@@ -23,12 +24,13 @@ from utils import get_app_icon, locate_file_in_explorer, copy_text_to_clipboard
 
 
 class TaskWorker(QThread):
-    """后台单任务转换线程"""
-    progress_signal = Signal(float, str)
-    finished_signal = Signal(bool, str)
+    """后台单任务转换线程，携带 task_id 标识以支持 4 核心并发调度"""
+    progress_signal = Signal(str, float, str)  # (task_id, ratio, msg)
+    finished_signal = Signal(str, bool, str)   # (task_id, success, msg)
 
-    def __init__(self, input_tif: str, output_kmz: str, auto_reproject: bool, qml_path: Optional[str] = None):
+    def __init__(self, task_id: str, input_tif: str, output_kmz: str, auto_reproject: bool, qml_path: Optional[str] = None):
         super().__init__()
+        self.task_id = task_id
         self.input_tif = input_tif
         self.output_kmz = output_kmz
         self.auto_reproject = auto_reproject
@@ -41,39 +43,55 @@ class TaskWorker(QThread):
     def run(self):
         try:
             if self._is_cancelled:
-                self.finished_signal.emit(False, "任务已中止")
+                self.finished_signal.emit(self.task_id, False, "任务已中止")
                 return
             success = convert_geodata_to_kmz(
                 input_file=self.input_tif,
                 output_kmz=self.output_kmz,
                 auto_reproject=self.auto_reproject,
                 qml_path=self.qml_path,
-                progress_callback=lambda ratio, msg: self.progress_signal.emit(ratio, msg),
+                progress_callback=lambda ratio, msg: self.progress_signal.emit(self.task_id, ratio, msg),
                 cancel_check=lambda: self._is_cancelled
             )
             if self._is_cancelled:
-                self.finished_signal.emit(False, "任务已中止")
+                self.finished_signal.emit(self.task_id, False, "任务已中止")
             elif success:
-                self.finished_signal.emit(True, "处理完成")
+                self.finished_signal.emit(self.task_id, True, "处理完成")
             else:
-                self.finished_signal.emit(False, "任务已中止" if self._is_cancelled else "转换失败")
+                self.finished_signal.emit(self.task_id, False, "任务已中止" if self._is_cancelled else "转换失败")
         except Exception as e:
             if self._is_cancelled:
-                self.finished_signal.emit(False, "任务已中止")
+                self.finished_signal.emit(self.task_id, False, "任务已中止")
             else:
-                self.finished_signal.emit(False, f"错误: {str(e)}")
+                self.finished_signal.emit(self.task_id, False, f"错误: {str(e)}")
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.worker: Optional[TaskWorker] = None
+        # 4 核心并发工作池与状态管理
+        self.MAX_CONCURRENT_WORKERS = 4
+        self.active_workers: Dict[str, TaskWorker] = {}
+        self.pending_task_ids: List[str] = []
+        self.task_progress_map: Dict[str, float] = {}
+
         self.tasks: List[Dict[str, Any]] = []
         self.current_task_idx = 0
         self.is_batch_running = False
         self.is_batch_cancelled = False
 
         self.init_ui()
+
+    @property
+    def worker(self) -> Optional[TaskWorker]:
+        """向后兼容属性：返回当前运行中的活跃工作线程之一"""
+        if self.active_workers:
+            return next(iter(self.active_workers.values()))
+        return None
+
+    @worker.setter
+    def worker(self, val):
+        pass
 
     def init_ui(self):
         self.setWindowTitle("GeoKMZ")
@@ -445,6 +463,7 @@ class MainWindow(QMainWindow):
                 self.append_log(f"已载入: {base_name} | {band_info} | {srs_desc}")
 
             task = {
+                "id": uuid.uuid4().hex,
                 "input": abs_fp,
                 "output": out_kmz,
                 "srs": srs_desc,
@@ -478,8 +497,21 @@ class MainWindow(QMainWindow):
     def clear_tasks(self):
         if self.is_batch_running:
             QMessageBox.warning(self, "警告", "正在执行转换任务，请先点击「停止处理」或等待完成。")
+    def find_row_by_task_id(self, task_id: str) -> int:
+        """根据唯一 task_id 高效反查当前表格中的行索引"""
+        for idx, t in enumerate(self.tasks):
+            if t.get("id") == task_id:
+                return idx
+        return -1
+
+    def clear_tasks(self):
+        if self.is_batch_running:
+            QMessageBox.warning(self, "警告", "正在执行转换任务，请先点击「停止处理」或等待完成。")
             return
         self.tasks.clear()
+        self.active_workers.clear()
+        self.pending_task_ids.clear()
+        self.task_progress_map.clear()
         self.current_task_idx = 0
         self.is_batch_cancelled = False
         self.table.setRowCount(0)
@@ -519,145 +551,210 @@ class MainWindow(QMainWindow):
                     task["status"] = "等待处理"
                     self.table.setItem(idx, 3, QTableWidgetItem("等待处理"))
                     self.table.setItem(idx, 4, QTableWidgetItem(task.get("detail", "-")))
+                self.task_progress_map.clear()
                 first_uncompleted_idx = 0
             else:
                 return
 
         self.is_batch_running = True
         self.is_batch_cancelled = False
+        self.current_task_idx = first_uncompleted_idx
         self.start_btn.setText("停止处理")
         self.start_btn.setObjectName("dangerBtn")
         self.start_btn.setStyleSheet("")
         self.add_file_btn.setEnabled(False)
         self.clear_table_btn.setEnabled(False)
-        self.current_task_idx = first_uncompleted_idx
         self.status_ready_label.setText("正在处理...")
 
-        total = len(self.tasks)
-        completed_count = sum(1 for t in self.tasks if t.get("status") == "成功")
-        initial_ratio = (completed_count / total) if total > 0 else 0.0
-        self.progress_bar.setValue(int(initial_ratio * 100))
-        self.progress_ratio_label.setText(f"{completed_count} / {total} · {initial_ratio * 100:.1f}%")
+        # 待处理队列：按顺序收集所有未成功的 task_id
+        self.pending_task_ids = [
+            t["id"] for t in self.tasks if t.get("status") != "成功"
+        ]
+        for t in self.tasks:
+            if t.get("status") == "成功":
+                self.task_progress_map[t["id"]] = 1.0
+            else:
+                self.task_progress_map[t["id"]] = 0.0
 
-        self.process_next_task()
+        self.update_overall_progress()
+        self.dispatch_workers()
 
     def cancel_processing(self):
         """用户主动请求停止批处理"""
         if not self.is_batch_running or self.is_batch_cancelled:
             return
         self.is_batch_cancelled = True
+        self.pending_task_ids.clear()
         self.start_btn.setEnabled(False)  # 避免重复点击
+        active_count = len(self.active_workers)
         self.task_status_tag.setText("正在停止...")
-        self.task_detail_label.setText("正在等待当前任务中止...")
-        self.append_log("用户请求停止处理，正在中止当前任务...")
-        if self.worker and self.worker.isRunning():
-            self.worker.cancel()
+        self.task_detail_label.setText(f"正在等待 {active_count} 个并行任务中止...")
+        self.append_log(f"用户请求停止处理，正在中止 {active_count} 个并行任务...")
+
+        if self.active_workers:
+            for worker in list(self.active_workers.values()):
+                worker.cancel()
         else:
-            self.process_next_task()
+            self.finish_batch_processing(was_cancelled=True)
 
-    def process_next_task(self):
-        # 跳过已经成功的任务，定位到下一个未完成任务
-        while self.current_task_idx < len(self.tasks) and self.tasks[self.current_task_idx].get("status") == "成功":
-            self.current_task_idx += 1
-
-        # 检查是否已中止或全部任务已完成
-        if self.is_batch_cancelled or self.current_task_idx >= len(self.tasks):
-            was_cancelled = self.is_batch_cancelled
-            self.is_batch_running = False
-            self.is_batch_cancelled = False
-            self.start_btn.setText("开始处理")
-            self.start_btn.setObjectName("primaryBtn")
-            self.start_btn.setStyleSheet("")
-            self.start_btn.setEnabled(True)
-            self.add_file_btn.setEnabled(True)
-            self.clear_table_btn.setEnabled(True)
-            self.status_ready_label.setText("就绪")
-
-            total = len(self.tasks)
-            completed_count = sum(1 for t in self.tasks if t.get("status") == "成功")
-            ratio = (completed_count / total) if total > 0 else 0.0
-            self.progress_bar.setValue(int(ratio * 100))
-            self.progress_ratio_label.setText(f"{completed_count} / {total} · {ratio * 100:.1f}%")
-
-            if was_cancelled:
-                self.task_status_tag.setText("已停止")
-                self.task_detail_label.setText(f"批处理已手动中止 (已完成 {completed_count}/{total})")
-                self.append_log(f"批处理已被用户手动中止，当前完成 {completed_count}/{total} 个文件。")
-            else:
-                self.task_status_tag.setText("全部处理完成")
-                self.task_detail_label.setText("所有文件转换完成")
-                self.append_log(f"批处理完成，共计 {total} 个文件。")
+    def dispatch_workers(self):
+        """4 核心并发任务派发调度器"""
+        if self.is_batch_cancelled:
             return
 
-        task = self.tasks[self.current_task_idx]
-        total = len(self.tasks)
-        current_num = self.current_task_idx + 1
+        while len(self.active_workers) < self.MAX_CONCURRENT_WORKERS and self.pending_task_ids:
+            task_id = self.pending_task_ids.pop(0)
+            row_idx = self.find_row_by_task_id(task_id)
+            if row_idx == -1:
+                continue
 
-        self.task_status_tag.setText(f"正在处理 ({current_num}/{total})")
-        base_name = os.path.basename(task['input'])
-        self.task_detail_label.setText(f"正在转换: {base_name}")
-        self.table.setItem(self.current_task_idx, 3, QTableWidgetItem("正在处理"))
-        self.table.setItem(self.current_task_idx, 4, QTableWidgetItem("转换中..."))
+            task = self.tasks[row_idx]
+            if task.get("status") == "成功":
+                continue
 
-        # 判断是否为矢量数据
-        is_vector = task.get("is_gpkg", False) and (
-            task.get("gpkg_summary") and task["gpkg_summary"].primary_category in ("vector", "mixed")
-        )
+            self.current_task_idx = row_idx
+            base_name = os.path.basename(task['input'])
+            self.table.setItem(row_idx, 3, QTableWidgetItem("正在处理"))
+            self.table.setItem(row_idx, 4, QTableWidgetItem("准备就绪 (4核并行)..."))
 
-        # 决定当前任务的生效 QML (仅对单波段栅格生效，不套用矢量点)
-        effective_qml = None
-        if not is_vector and task.get("band_count", 0) == 1:
-            effective_qml = self.get_effective_qml_path()
-            if effective_qml:
-                self.append_log(f"应用样式: {os.path.basename(effective_qml)} -> {base_name}")
+            is_vector = task.get("is_gpkg", False) and (
+                task.get("gpkg_summary") and task["gpkg_summary"].primary_category in ("vector", "mixed")
+            )
 
-        if is_vector:
-            self.append_log(f"开始导出矢量要素: {base_name} -> {os.path.basename(task['output'])}")
-        else:
-            self.append_log(f"开始切片: {base_name} -> {os.path.basename(task['output'])}")
+            effective_qml = None
+            if not is_vector and task.get("band_count", 0) == 1:
+                effective_qml = self.get_effective_qml_path()
+                if effective_qml:
+                    self.append_log(f"应用样式: {os.path.basename(effective_qml)} -> {base_name}")
 
-        self.worker = TaskWorker(
-            input_tif=task['input'],
-            output_kmz=task['output'],
-            auto_reproject=self.chk_reproject.isChecked(),
-            qml_path=effective_qml
-        )
-        self.worker.progress_signal.connect(self.on_task_progress)
-        self.worker.finished_signal.connect(self.on_task_finished)
-        self.worker.start()
+            if is_vector:
+                self.append_log(f"[4核并行] 开始导出矢量要素: {base_name} -> {os.path.basename(task['output'])}")
+            else:
+                self.append_log(f"[4核并行] 开始切片: {base_name} -> {os.path.basename(task['output'])}")
 
-    def on_task_progress(self, ratio: float, msg: str):
+            worker = TaskWorker(
+                task_id=task_id,
+                input_tif=task['input'],
+                output_kmz=task['output'],
+                auto_reproject=self.chk_reproject.isChecked(),
+                qml_path=effective_qml
+            )
+            worker.progress_signal.connect(self.on_task_progress)
+            worker.finished_signal.connect(self.on_task_finished)
+            self.active_workers[task_id] = worker
+            worker.start()
+
+        # 更新向后兼容属性：记录当前活跃任务的最小行号
+        active_rows = [self.find_row_by_task_id(tid) for tid in self.active_workers.keys()]
+        valid_active_rows = [r for r in active_rows if r != -1]
+        if valid_active_rows:
+            self.current_task_idx = min(valid_active_rows)
+
+        self.update_header_status()
+
+        if not self.active_workers and not self.pending_task_ids:
+            self.finish_batch_processing(was_cancelled=False)
+
+    def process_next_task(self):
+        """向后兼容接口：调度派发 4 核心并发任务"""
+        self.dispatch_workers()
+
+    def on_task_progress(self, task_id: str, ratio: float, msg: str):
+        self.task_progress_map[task_id] = ratio
         task_percent = int(ratio * 100)
+        row_idx = self.find_row_by_task_id(task_id)
+        if row_idx != -1:
+            self.table.setItem(row_idx, 4, QTableWidgetItem(f"{msg} ({task_percent}%)"))
+        self.update_overall_progress()
+
+    def on_task_finished(self, task_id: str, success: bool, msg: str):
+        row_idx = self.find_row_by_task_id(task_id)
+        if row_idx != -1:
+            task = self.tasks[row_idx]
+            base_name = os.path.basename(task['input'])
+            if self.is_batch_cancelled:
+                task["status"] = "已中止"
+                self.table.setItem(row_idx, 3, QTableWidgetItem("已中止"))
+                self.table.setItem(row_idx, 4, QTableWidgetItem("用户手动停止"))
+                self.append_log(f"任务已中止: {base_name}")
+            elif success:
+                task["status"] = "成功"
+                self.task_progress_map[task_id] = 1.0
+                self.table.setItem(row_idx, 3, QTableWidgetItem("成功"))
+                self.table.setItem(row_idx, 4, QTableWidgetItem("已生成 KMZ"))
+                self.append_log(f"[4核完成]: {base_name}")
+            else:
+                task["status"] = "失败"
+                self.table.setItem(row_idx, 3, QTableWidgetItem("失败"))
+                self.table.setItem(row_idx, 4, QTableWidgetItem(msg))
+                self.append_log(f"[处理失败]: {base_name}, 原因: {msg}")
+
+        self.active_workers.pop(task_id, None)
+        self.update_overall_progress()
+
+        if self.is_batch_cancelled:
+            if not self.active_workers:
+                self.finish_batch_processing(was_cancelled=True)
+        else:
+            self.dispatch_workers()
+
+    def update_overall_progress(self):
         total = len(self.tasks)
-        completed_count = sum(1 for idx, t in enumerate(self.tasks) if t.get("status") == "成功" and idx != self.current_task_idx)
-        overall_ratio = (completed_count + ratio) / total if total > 0 else 0.0
+        if total == 0:
+            self.progress_bar.setValue(0)
+            self.progress_ratio_label.setText("0 / 0 · 0.0%")
+            return
+
+        completed_count = sum(1 for t in self.tasks if t.get("status") == "成功")
+        total_ratio_sum = sum(
+            self.task_progress_map.get(t.get("id"), 1.0 if t.get("status") == "成功" else 0.0)
+            for t in self.tasks
+        )
+        overall_ratio = min(1.0, max(0.0, total_ratio_sum / total))
         overall_percent = overall_ratio * 100
 
         self.progress_bar.setValue(int(overall_percent))
         self.progress_ratio_label.setText(f"{completed_count} / {total} · {overall_percent:.1f}%")
-        self.table.setItem(self.current_task_idx, 4, QTableWidgetItem(f"{msg} ({task_percent}%)"))
 
-    def on_task_finished(self, success: bool, msg: str):
-        row = self.current_task_idx
-        if 0 <= row < len(self.tasks):
-            if self.is_batch_cancelled:
-                self.tasks[row]["status"] = "已中止"
-                self.table.setItem(row, 3, QTableWidgetItem("已中止"))
-                self.table.setItem(row, 4, QTableWidgetItem("用户手动停止"))
-                self.append_log(f"任务已中止: {os.path.basename(self.tasks[row]['input'])}")
-            elif success:
-                self.tasks[row]["status"] = "成功"
-                self.table.setItem(row, 3, QTableWidgetItem("成功"))
-                self.table.setItem(row, 4, QTableWidgetItem("已生成 KMZ"))
-                self.append_log(f"处理完成: {os.path.basename(self.tasks[row]['input'])}")
-            else:
-                self.tasks[row]["status"] = "失败"
-                self.table.setItem(row, 3, QTableWidgetItem("失败"))
-                self.table.setItem(row, 4, QTableWidgetItem(msg))
-                self.append_log(f"处理失败: {os.path.basename(self.tasks[row]['input'])}, 原因: {msg}")
+    def update_header_status(self):
+        total = len(self.tasks)
+        completed_count = sum(1 for t in self.tasks if t.get("status") == "成功")
+        active_count = len(self.active_workers)
+        if active_count > 0:
+            self.task_status_tag.setText(f"4核并行处理中 ({active_count}个并行 · 已完成 {completed_count}/{total})")
+            active_names = []
+            for tid in self.active_workers.keys():
+                row = self.find_row_by_task_id(tid)
+                if row != -1:
+                    active_names.append(os.path.basename(self.tasks[row]['input']))
+            self.task_detail_label.setText(f"正在并行转换: {', '.join(active_names[:3])}{'...' if len(active_names) > 3 else ''}")
 
-        self.current_task_idx += 1
-        self.process_next_task()
+    def finish_batch_processing(self, was_cancelled: bool):
+        self.is_batch_running = False
+        self.is_batch_cancelled = False
+        self.active_workers.clear()
+        self.pending_task_ids.clear()
+
+        self.start_btn.setText("开始处理")
+        self.start_btn.setObjectName("primaryBtn")
+        self.start_btn.setStyleSheet("")
+        self.start_btn.setEnabled(True)
+        self.add_file_btn.setEnabled(True)
+        self.clear_table_btn.setEnabled(True)
+        self.status_ready_label.setText("就绪")
+
+        total = len(self.tasks)
+        completed_count = sum(1 for t in self.tasks if t.get("status") == "成功")
+        self.update_overall_progress()
+
+        if was_cancelled:
+            self.task_status_tag.setText("已停止")
+            self.task_detail_label.setText(f"批处理已手动中止 (已完成 {completed_count}/{total})")
+            self.append_log(f"批处理已被用户手动中止，当前完成 {completed_count}/{total} 个文件。")
+        else:
+            self.task_status_tag.setText("全部处理完成")
+            self.task_detail_label.setText(f"所有文件转换完成 (4核并行加速完成 {completed_count}/{total})")
+            self.append_log(f"4核并发批处理圆满完成，共计处理 {total} 个文件。")
 
     def locate_task_file(self, row: int, target: str = "output"):
         """在文件资源管理器中定位并高亮选中文件"""
@@ -687,18 +784,19 @@ class MainWindow(QMainWindow):
 
         for r in selected_rows:
             if r < len(self.tasks):
-                # 如果正在运行批处理，保护当前正在切片的任务不被强行打断
-                if self.is_batch_running and r == self.current_task_idx:
+                task_id = self.tasks[r].get("id")
+                # 如果正在运行批处理，保护当前正在并行切片的活跃任务不被强行打断
+                if self.is_batch_running and task_id in self.active_workers:
                     skipped_running = True
                     continue
+
+                if task_id in self.pending_task_ids:
+                    self.pending_task_ids.remove(task_id)
+                self.task_progress_map.pop(task_id, None)
 
                 del self.tasks[r]
                 self.table.removeRow(r)
                 removed_count += 1
-
-                # 若被删除的行在当前正在处理的任务之前，相应递减当前任务索引以保持队列对齐
-                if self.is_batch_running and r < self.current_task_idx:
-                    self.current_task_idx -= 1
 
         total = len(self.tasks)
         if total == 0:
@@ -707,24 +805,21 @@ class MainWindow(QMainWindow):
             self.progress_bar.setValue(0)
             self.progress_ratio_label.setText("0 / 0 · 0.0%")
         elif self.is_batch_running:
-            cur_num = self.current_task_idx + 1
-            self.task_status_tag.setText(f"正在处理 ({cur_num}/{total})")
-            completed_count = sum(1 for idx, t in enumerate(self.tasks) if t.get("status") == "成功" and idx != self.current_task_idx)
-            task_ratio = completed_count / total if total > 0 else 0.0
-            self.progress_ratio_label.setText(f"{completed_count} / {total} · {task_ratio*100:.1f}%")
+            self.update_header_status()
+            self.update_overall_progress()
         else:
             completed_count = sum(1 for t in self.tasks if t.get("status") == "成功")
-            ratio = (completed_count / total) if total > 0 else 0.0
-            self.progress_bar.setValue(int(ratio * 100))
-            self.progress_ratio_label.setText(f"{completed_count} / {total} · {ratio*100:.1f}%")
+            task_ratio = completed_count / total if total > 0 else 0.0
+            self.progress_bar.setValue(int(task_ratio * 100))
+            self.progress_ratio_label.setText(f"{completed_count} / {total} · {task_ratio*100:.1f}%")
 
         if removed_count > 0:
             self.append_log(f"已从任务列表中移除 {removed_count} 项。")
 
         if skipped_running:
-            self.append_log("提示: 正在切片处理中的任务暂不支持直接移除，已保留。")
+            self.append_log("提示: 正在4核并行处理中的任务暂不支持直接移除，已保留。")
             if removed_count == 0:
-                QMessageBox.information(self, "提示", "当前正在切片处理中的文件不支持直接移除，可移除排队中或已完成的任务。")
+                QMessageBox.information(self, "提示", "当前正在4核并行处理中的文件不支持直接移除，可移除排队中或已完成的任务。")
 
     def show_table_context_menu(self, pos):
         """弹出任务列表右键上下文菜单"""

@@ -1,6 +1,7 @@
 import os
 import sys
 import tempfile
+import uuid
 from typing import Callable, Optional, Dict, Any, List
 from osgeo import gdal, osr
 
@@ -169,11 +170,12 @@ def convert_tif_to_kmz(
         return callback
 
     colored_ds = None
-    colored_vsi_path = f"/vsimem/colored_{os.getpid()}.tif"
+    mem_uid = uuid.uuid4().hex[:12]
+    colored_vsi_path = f"/vsimem/colored_{mem_uid}.tif"
     temp_color_file = None
 
     warp_temp_ds = None
-    vsimem_path = f"/vsimem/warp_temp_{os.getpid()}.tif"
+    vsimem_path = f"/vsimem/warp_temp_{mem_uid}.tif"
     out_ds = None
 
     try:
