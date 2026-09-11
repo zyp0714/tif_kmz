@@ -248,15 +248,6 @@ class MainWindow(QMainWindow):
         header_layout = QHBoxLayout()
         header_layout.setSpacing(12)
 
-        # 软件品牌 Logo 图标
-        logo_icon = get_app_icon()
-        if not logo_icon.isNull():
-            logo_label = QLabel(self)
-            logo_pix = logo_icon.pixmap(36, 36)
-            logo_label.setPixmap(logo_pix)
-            logo_label.setFixedSize(36, 36)
-            header_layout.addWidget(logo_label)
-
         title_layout = QVBoxLayout()
         title_label = QLabel("GeoTIFF to KMZ Processor", self)
         title_label.setObjectName("headerTitle")
