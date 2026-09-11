@@ -347,7 +347,7 @@ class MainWindow(QMainWindow):
         result_layout.setSpacing(8)
 
         table_header_layout = QHBoxLayout()
-        table_title = QLabel("处理结果", result_frame)
+        table_title = QLabel("任务列表", result_frame)
         table_title.setObjectName("sectionTitle")
         self.chk_reproject = QCheckBox("自动校准为 WGS84 (EPSG:4326) 坐标系", result_frame)
         self.chk_reproject.setChecked(True)
@@ -416,7 +416,7 @@ class MainWindow(QMainWindow):
         # 表格控件
         self.table = QTableWidget(result_frame)
         self.table.setColumnCount(5)
-        self.table.setHorizontalHeaderLabels(["文件名", "原始坐标系", "格式选项", "状态", "详细信息"])
+        self.table.setHorizontalHeaderLabels(["文件名", "原始坐标系", "数据类型", "状态", "详细信息"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
@@ -848,13 +848,13 @@ class MainWindow(QMainWindow):
 
         menu = QMenu(self)
 
-        # 1. 定位 KMZ 成果
-        locate_kmz_action = menu.addAction("定位 KMZ 成果")
+        # 1. 打开成果所在目录
+        locate_kmz_action = menu.addAction("打开成果所在目录")
         locate_kmz_action.setEnabled(kmz_exists)
         locate_kmz_action.triggered.connect(lambda: self.locate_task_file(first_row, target="output"))
 
-        # 2. 定位原始输入文件
-        locate_src_action = menu.addAction("定位原始输入文件")
+        # 2. 打开源文件所在目录
+        locate_src_action = menu.addAction("打开源文件所在目录")
         locate_src_action.setEnabled(src_exists)
         locate_src_action.triggered.connect(lambda: self.locate_task_file(first_row, target="input"))
 
