@@ -85,10 +85,28 @@ def build(onedir=True):
         subprocess.run(["taskkill", "/f", "/im", "GeoKMZ.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         subprocess.run(["taskkill", "/f", "/im", "tif2kmz.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+    base_prefix = sys.prefix
+    library_bin = os.path.join(base_prefix, 'Library', 'bin')
+    conda_paths = [
+        base_prefix,
+        os.path.join(base_prefix, 'Library', 'mingw-w64', 'bin'),
+        os.path.join(base_prefix, 'Library', 'usr', 'bin'),
+        library_bin,
+        os.path.join(base_prefix, 'Scripts'),
+        os.path.join(base_prefix, 'bin')
+    ]
+    # 确保 Conda DLL 路径注入到当前进程 PATH 中
+    existing_path = os.environ.get("PATH", "")
+    for cp in reversed(conda_paths):
+        if os.path.exists(cp) and cp.lower() not in existing_path.lower():
+            existing_path = cp + os.pathsep + existing_path
+    os.environ["PATH"] = existing_path
+
     proj_dir, gdal_dir = find_data_dirs()
     print("=" * 60)
     print("正在准备打包 GeoKMZ 转换工具...")
     print(f"[*] Python 路径: {sys.executable}")
+    print(f"[*] Conda Library 路径: {library_bin}")
     print(f"[*] PROJ 数据目录: {proj_dir if proj_dir else '未找到(将尝试使用默认系统配置)'}")
     print(f"[*] GDAL 数据目录: {gdal_dir if gdal_dir else '未找到(将尝试使用默认系统配置)'}")
     print("=" * 60)
@@ -99,7 +117,10 @@ def build(onedir=True):
         "--clean",
         "--name=GeoKMZ",
         "--windowed",            # 默认不显示黑色控制台黑框，双击直接出 UI
+        f"--paths={library_bin}",
         "--collect-all=osgeo",   # 自动收集 osgeo 所有的 c/c++ dll 和数据
+        "--collect-binaries=shiboken6",
+        "--collect-binaries=PySide6",
         # 排除无用的 Qt 大模块 (瘦身约 100MB)
         "--exclude-module=PySide6.QtWebEngineCore",
         "--exclude-module=PySide6.QtWebEngineWidgets",
