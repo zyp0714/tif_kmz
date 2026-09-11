@@ -42,19 +42,15 @@ def parse_color_str(color_val: str, default_alpha: int = 255) -> Tuple[int, int,
 
 import math
 
-def parse_qml_color_ramp(qml_path: str) -> Tuple[List[Tuple[float, int, int, int, int]], str]:
+def parse_qml_content(xml_content: str) -> Tuple[List[Tuple[float, int, int, int, int]], str]:
     """
-    解析 QGIS .qml 样式文件，提取单波段伪彩色（Singleband Pseudocolor）的色标表及渲染模式。
+    解析 QML XML 字符串内容，提取单波段伪彩色的色标表及渲染模式。
+    支持从文件读取或直接从 GPKG 数据库 layer_styles 字段中提取的 XML 字符串。
 
-    :param qml_path: .qml 文件路径
+    :param xml_content: QML XML 文本
     :return: (排序后的列表 [(value, R, G, B, Alpha), ...], ramp_type 如 "DISCRETE" 或 "INTERPOLATED")
     """
-    if not os.path.exists(qml_path):
-        raise FileNotFoundError(f"未找到 QML 样式文件: {qml_path}")
-
-    tree = ET.parse(qml_path)
-    root = tree.getroot()
-
+    root = ET.fromstring(xml_content)
     color_entries: List[Tuple[float, int, int, int, int]] = []
     ramp_type = "INTERPOLATED"
 
@@ -99,11 +95,27 @@ def parse_qml_color_ramp(qml_path: str) -> Tuple[List[Tuple[float, int, int, int
                     continue
 
     if not color_entries:
-        raise ValueError(f"在样式文件 {os.path.basename(qml_path)} 中未解析到有效的栅格单波段颜色映射 (colorrampshader item)")
+        raise ValueError("在样式内容中未解析到有效的栅格单波段颜色映射 (colorrampshader item)")
 
     # 按照数值升序排序
     color_entries.sort(key=lambda x: x[0])
     return color_entries, ramp_type
+
+
+def parse_qml_color_ramp(qml_path: str) -> Tuple[List[Tuple[float, int, int, int, int]], str]:
+    """
+    解析 QGIS .qml 样式文件，提取单波段伪彩色（Singleband Pseudocolor）的色标表及渲染模式。
+
+    :param qml_path: .qml 文件路径
+    :return: (排序后的列表 [(value, R, G, B, Alpha), ...], ramp_type 如 "DISCRETE" 或 "INTERPOLATED")
+    """
+    if not os.path.exists(qml_path):
+        raise FileNotFoundError(f"未找到 QML 样式文件: {qml_path}")
+
+    with open(qml_path, 'r', encoding='utf-8', errors='ignore') as f:
+        xml_content = f.read()
+
+    return parse_qml_content(xml_content)
 
 
 def generate_gdal_color_file(

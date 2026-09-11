@@ -17,6 +17,7 @@ from osgeo import gdal, osr
 
 from converter import convert_tif_to_kmz, is_wgs84, setup_gdal_env, get_raster_metadata
 from qml_parser import get_default_qml_path
+from gpkg_analyzer import analyze_gpkg
 
 
 class TaskWorker(QThread):
@@ -459,13 +460,13 @@ class MainWindow(QMainWindow):
 
     def dropEvent(self, event: QDropEvent):
         urls = event.mimeData().urls()
-        files = [u.toLocalFile() for u in urls if u.toLocalFile().lower().endswith(('.tif', '.tiff'))]
+        files = [u.toLocalFile() for u in urls if u.toLocalFile().lower().endswith(('.tif', '.tiff', '.gpkg'))]
         if files:
             self.add_files(files)
 
     def choose_files(self):
         file_paths, _ = QFileDialog.getOpenFileNames(
-            self, "选择 GeoTIFF 文件", "", "GeoTIFF 栅格 (*.tif *.tiff)"
+            self, "选择地理空间数据文件", "", "地理空间数据 (*.tif *.tiff *.gpkg);;GeoTIFF 栅格 (*.tif *.tiff);;GeoPackage 数据库 (*.gpkg);;所有文件 (*.*)"
         )
         if file_paths:
             self.add_files(file_paths)
@@ -531,21 +532,48 @@ class MainWindow(QMainWindow):
                 self.append_log(f"目标输出已存在于任务列表中，已自动去重: {os.path.basename(out_kmz)}")
                 continue
 
-            # 探测元数据
-            meta = get_raster_metadata(abs_fp)
-            band_count = meta.get("band_count", 1)
-            srs_desc = meta.get("srs_desc", "未知坐标系")
+            is_gpkg = abs_fp.lower().endswith('.gpkg')
+            gpkg_summary = None
 
-            # 动态格式描述
-            format_desc = "单波段 QML着色" if band_count == 1 else "多波段 PNG切片"
+            if is_gpkg:
+                try:
+                    gpkg_summary = analyze_gpkg(abs_fp)
+                    format_desc = gpkg_summary.get_brief_description()
+                    srs_desc = "未知坐标系"
+                    if gpkg_summary.layers:
+                        srs_desc = gpkg_summary.layers[0].srs_desc
+                    band_count = 1
+                    if gpkg_summary.raster_layers:
+                        band_count = gpkg_summary.raster_layers[0].band_count
+                    detail_text = f"包含 {len(gpkg_summary.layers)} 个图层"
+                    if gpkg_summary.embedded_styles_count > 0:
+                        detail_text += " (含内置QML)"
+                    self.append_log(f"已载入 GPKG: {base_name} | {format_desc} | {srs_desc}")
+                except Exception as e:
+                    format_desc = "GPKG (解析失败)"
+                    srs_desc = "未知坐标系"
+                    band_count = 0
+                    detail_text = f"错误: {e}"
+                    self.append_log(f"GPKG 解析异常 [{base_name}]: {e}")
+            else:
+                # 探测栅格元数据
+                meta = get_raster_metadata(abs_fp)
+                band_count = meta.get("band_count", 1)
+                srs_desc = meta.get("srs_desc", "未知坐标系")
+                format_desc = "单波段 QML着色" if band_count == 1 else "多波段 PNG切片"
+                detail_text = "-"
+                band_info = f"单波段({band_count}波段)" if band_count == 1 else f"多波段({band_count}波段)"
+                self.append_log(f"已载入: {base_name} | {band_info} | {srs_desc}")
 
             task = {
                 "input": abs_fp,
                 "output": out_kmz,
                 "srs": srs_desc,
                 "band_count": band_count,
+                "is_gpkg": is_gpkg,
+                "gpkg_summary": gpkg_summary,
                 "status": "等待处理",
-                "detail": "-"
+                "detail": detail_text
             }
             self.tasks.append(task)
 
@@ -556,10 +584,7 @@ class MainWindow(QMainWindow):
             self.table.setItem(row, 1, QTableWidgetItem(srs_desc))
             self.table.setItem(row, 2, QTableWidgetItem(format_desc))
             self.table.setItem(row, 3, QTableWidgetItem("等待处理"))
-            self.table.setItem(row, 4, QTableWidgetItem("-"))
-
-            band_info = f"单波段({band_count}波段)" if band_count == 1 else f"多波段({band_count}波段)"
-            self.append_log(f"已载入: {base_name} | {band_info} | {srs_desc}")
+            self.table.setItem(row, 4, QTableWidgetItem(detail_text))
 
         total = len(self.tasks)
         self.progress_ratio_label.setText(f"0 / {total} · 0.0%")
