@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QFont, QDragEnterEvent, QDropEvent
 from osgeo import gdal, osr
 
-from converter import convert_tif_to_kmz, is_wgs84, setup_gdal_env, get_raster_metadata
+from converter import convert_tif_to_kmz, is_wgs84, setup_gdal_env, get_raster_metadata, convert_geodata_to_kmz
 from qml_parser import get_default_qml_path
 from gpkg_analyzer import analyze_gpkg
 
@@ -38,8 +38,8 @@ class TaskWorker(QThread):
 
     def run(self):
         try:
-            success = convert_tif_to_kmz(
-                input_tif=self.input_tif,
+            success = convert_geodata_to_kmz(
+                input_file=self.input_tif,
                 output_kmz=self.output_kmz,
                 auto_reproject=self.auto_reproject,
                 qml_path=self.qml_path,
@@ -275,7 +275,7 @@ class MainWindow(QMainWindow):
         task_layout.addWidget(self.progress_bar)
 
         task_bottom_row = QHBoxLayout()
-        self.task_detail_label = QLabel("选择文件或拖拽 .tif 文件到列表中开始处理", task_frame)
+        self.task_detail_label = QLabel("选择文件或拖拽 .tif / .gpkg 文件到列表中开始处理", task_frame)
         self.task_detail_label.setObjectName("statusTag")
         self.progress_ratio_label = QLabel("0 / 0 · 0.0%", task_frame)
         self.progress_ratio_label.setObjectName("statusTag")
@@ -601,12 +601,12 @@ class MainWindow(QMainWindow):
         self.table.setRowCount(0)
         self.progress_bar.setValue(0)
         self.task_status_tag.setText("等待开始")
-        self.task_detail_label.setText("选择文件或拖拽 .tif 文件到列表中开始处理")
+        self.task_detail_label.setText("选择文件或拖拽 .tif / .gpkg 文件到列表中开始处理")
         self.progress_ratio_label.setText("0 / 0 · 0.0%")
 
     def start_processing(self):
         if not self.tasks:
-            QMessageBox.information(self, "提示", "请先添加待处理的 GeoTIFF 文件。")
+            QMessageBox.information(self, "提示", "请先添加待处理的 GeoTIFF 或 GeoPackage 文件。")
             return
 
         if self.is_batch_running:
@@ -749,8 +749,8 @@ def run_cli(args):
         print(f"\r[{bar}] {percent}% - {msg}", end="", flush=True)
 
     try:
-        convert_tif_to_kmz(
-            input_tif=args.input,
+        convert_geodata_to_kmz(
+            input_file=args.input,
             output_kmz=args.output,
             auto_reproject=not args.no_warp,
             qml_path=qml_file,

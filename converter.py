@@ -5,6 +5,7 @@ from typing import Callable, Optional, Dict, Any
 from osgeo import gdal, osr
 
 from qml_parser import parse_qml_color_ramp, generate_gdal_color_file, get_default_qml_path
+from gpkg_analyzer import analyze_gpkg
 
 # 启用 GDAL 异常抛出，便于精确捕获错误
 gdal.UseExceptions()
@@ -225,3 +226,140 @@ def convert_tif_to_kmz(
                 pass
         if src_ds is not None:
             src_ds = None
+
+
+def convert_vector_to_kmz(
+    input_vector: str,
+    output_kmz: str,
+    auto_reproject: bool = True,
+    progress_callback: Optional[Callable[[float, str], None]] = None,
+    cancel_check: Optional[Callable[[], bool]] = None
+) -> bool:
+    """
+    将矢量空间数据（如 InSAR PS 散点、等值线、GPKG 矢量要素）转换为 Google Earth 矢量 KMZ。
+    支持：
+    - 自动空间坐标纠偏并重投影至 EPSG:4326 (WGS84)；
+    - 完整保留全部业务属性字段（点编号、沉降速率、历史形变序列等）；
+    - 在 Google Earth 中点击要素自动弹出属性表格（Schema / ExtendedData 卡片）。
+    """
+    setup_gdal_env()
+
+    if not os.path.exists(input_vector):
+        raise FileNotFoundError(f"输入文件不存在: {input_vector}")
+
+    out_dir = os.path.dirname(os.path.abspath(output_kmz))
+    if out_dir and not os.path.exists(out_dir):
+        os.makedirs(out_dir, exist_ok=True)
+
+    if progress_callback:
+        progress_callback(0.1, "正在初始化 OGR 矢量转换引擎...")
+
+    def ogr_progress(complete, message, user_data):
+        if cancel_check and cancel_check():
+            return 0
+        if progress_callback:
+            percent = int(complete * 100)
+            msg = message if message else f"正在导出矢量要素至 KMZ... {percent}%"
+            progress_callback(0.1 + complete * 0.85, msg)
+        return 1
+
+    vt_options = gdal.VectorTranslateOptions(
+        format="LIBKML",
+        dstSRS="EPSG:4326" if auto_reproject else None,
+        reproject=auto_reproject,
+        callback=ogr_progress
+    )
+
+    out_ds = gdal.VectorTranslate(output_kmz, input_vector, options=vt_options)
+    if out_ds is None:
+        raise RuntimeError(f"矢量数据转换为 KMZ 失败: {os.path.basename(input_vector)}")
+    out_ds = None
+
+    if progress_callback:
+        progress_callback(1.0, "矢量要素导出完成，KMZ 文件已生成。")
+    return True
+
+
+def convert_geodata_to_kmz(
+    input_file: str,
+    output_kmz: str,
+    auto_reproject: bool = True,
+    qml_path: Optional[str] = None,
+    progress_callback: Optional[Callable[[float, str], None]] = None,
+    cancel_check: Optional[Callable[[], bool]] = None
+) -> bool:
+    """
+    通用空间数据转 KMZ 调度入口。
+    自动感知文件类型（GeoTIFF / GPKG 矢量 / GPKG 栅格）：
+    - 矢量数据（如 InSAR PS 点、等值线）：调用矢量转换管道（LIBKML），保留全部属性弹窗；
+    - 栅格数据（如 TIF、GPKG 栅格）：调用栅格切片管道（QML 伪彩着色 + SuperOverlay LOD 金字塔）。
+    """
+    if not os.path.exists(input_file):
+        raise FileNotFoundError(f"输入文件不存在: {input_file}")
+
+    ext = os.path.splitext(input_file)[1].lower()
+
+    # 如果是 GeoPackage 数据库文件，通过分析引擎自动分流
+    if ext == ".gpkg":
+        summary = analyze_gpkg(input_file)
+        if summary.primary_category == "vector":
+            count = summary.vector_layers[0].feature_count if summary.vector_layers else 0
+            if progress_callback:
+                progress_callback(0.05, f"检测到 GPKG 矢量要素图层 (共 {count} 条)，分流至矢量管道...")
+            return convert_vector_to_kmz(
+                input_vector=input_file,
+                output_kmz=output_kmz,
+                auto_reproject=auto_reproject,
+                progress_callback=progress_callback,
+                cancel_check=cancel_check
+            )
+        elif summary.primary_category == "raster":
+            # 如果存在内置 QML 样式且用户未指定外部样式，优先使用内置样式
+            eff_qml = qml_path
+            temp_qml_file = None
+            if not eff_qml and summary.raster_layers and summary.raster_layers[0].has_embedded_qml:
+                qml_text = summary.raster_layers[0].embedded_qml_content
+                if qml_text:
+                    fd, temp_qml_file = tempfile.mkstemp(suffix="_embedded.qml")
+                    os.close(fd)
+                    with open(temp_qml_file, 'w', encoding='utf-8') as f:
+                        f.write(qml_text)
+                    eff_qml = temp_qml_file
+            try:
+                if progress_callback:
+                    progress_callback(0.05, "检测到 GPKG 栅格图层，分流至金字塔切片管道...")
+                return convert_tif_to_kmz(
+                    input_tif=input_file,
+                    output_kmz=output_kmz,
+                    auto_reproject=auto_reproject,
+                    qml_path=eff_qml,
+                    progress_callback=progress_callback,
+                    cancel_check=cancel_check
+                )
+            finally:
+                if temp_qml_file and os.path.exists(temp_qml_file):
+                    try:
+                        os.remove(temp_qml_file)
+                    except Exception:
+                        pass
+        elif summary.primary_category == "mixed":
+            return convert_vector_to_kmz(
+                input_vector=input_file,
+                output_kmz=output_kmz,
+                auto_reproject=auto_reproject,
+                progress_callback=progress_callback,
+                cancel_check=cancel_check
+            )
+        else:
+            raise ValueError(f"GPKG 文件中未找到可转换的有效图层: {os.path.basename(input_file)}")
+
+    # 默认作为栅格文件处理 (GeoTIFF 等)
+    return convert_tif_to_kmz(
+        input_tif=input_file,
+        output_kmz=output_kmz,
+        auto_reproject=auto_reproject,
+        qml_path=qml_path,
+        progress_callback=progress_callback,
+        cancel_check=cancel_check
+    )
+

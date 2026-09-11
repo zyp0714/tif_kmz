@@ -108,7 +108,22 @@ def test_gpkg_content_perception():
         assert "矢量POINT(50条)" in brief, "紧凑回显应包含矢量POINT(50条)"
         assert "[内置QML]" in brief, "紧凑回显应标记[内置QML]"
         
-        print("\n[SUCCESS] GPKG 智能内容感知与样式提取引擎验证 100% 通过！")
+        # 5. 端到端测试：直接通过 convert_geodata_to_kmz 转换为 Google Earth KMZ
+        from converter import convert_geodata_to_kmz
+        out_kmz = os.path.join(temp_dir, "test_output.kmz")
+        conv_ok = convert_geodata_to_kmz(gpkg_path, out_kmz, auto_reproject=True)
+        assert conv_ok is True, "convert_geodata_to_kmz 必须成功"
+        assert os.path.exists(out_kmz), "输出 KMZ 文件必须存在"
+        
+        import zipfile
+        with zipfile.ZipFile(out_kmz, 'r') as z:
+            names = z.namelist()
+            print(f"[+] KMZ 归档结构: {names}")
+            assert "doc.kml" in names, "KMZ 必须包含 doc.kml"
+            sub_kmls = [n for n in names if n.endswith('.kml')]
+            assert len(sub_kmls) >= 1, "必须包含 KML 要素图层"
+            
+        print("\n[SUCCESS] GPKG 智能内容感知与矢量转 KMZ 全链路端到端验证 100% 通过！")
 
 
 if __name__ == "__main__":
