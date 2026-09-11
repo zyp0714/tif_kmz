@@ -50,6 +50,10 @@ def setup_gdal_env():
             os.environ['GDAL_DATA'] = g
             break
 
+    # 启用多核心并行计算加速与 1024MB 高速块缓存
+    gdal.SetConfigOption("GDAL_NUM_THREADS", "ALL_CPUS")
+    gdal.SetConfigOption("GDAL_CACHEMAX", "1024")
+
 
 def is_wgs84(dataset: gdal.Dataset) -> bool:
     """检查数据集是否已经是 WGS84 经纬度坐标系 (EPSG:4326)"""
@@ -126,17 +130,43 @@ def convert_tif_to_kmz(
     if out_dir and not os.path.exists(out_dir):
         os.makedirs(out_dir, exist_ok=True)
 
-    def gdal_progress(complete, message, user_data):
-        if cancel_check and cancel_check():
-            return 0  # 返回 0 中止 GDAL 执行
-        if progress_callback:
-            msg = message if message else f"正在切片中... {int(complete * 100)}%"
-            progress_callback(complete, msg)
-        return 1  # 返回 1 继续
-
     src_ds = gdal.Open(input_tif, gdal.GA_ReadOnly)
     if src_ds is None:
         raise RuntimeError(f"无法读取栅格文件: {input_tif}")
+
+    # 预判处理阶段，为各阶段分配加权进度区间，确保进度条平滑单向推进 (0% -> 100%)
+    has_qml = (src_ds.RasterCount == 1 and bool(qml_path and os.path.exists(qml_path)))
+    has_warp = (auto_reproject and not is_wgs84(src_ds))
+
+    if has_qml and has_warp:
+        qml_span = (0.0, 0.30)
+        warp_span = (0.30, 0.60)
+        translate_span = (0.60, 1.0)
+    elif has_qml and not has_warp:
+        qml_span = (0.0, 0.35)
+        warp_span = None
+        translate_span = (0.35, 1.0)
+    elif not has_qml and has_warp:
+        qml_span = None
+        warp_span = (0.0, 0.35)
+        translate_span = (0.35, 1.0)
+    else:
+        qml_span = None
+        warp_span = None
+        translate_span = (0.0, 1.0)
+
+    def make_progress_handler(span, stage_title: str):
+        start_ratio, end_ratio = span
+        def callback(complete, message, user_data):
+            if cancel_check and cancel_check():
+                return 0  # 返回 0 中止 GDAL 执行
+            if progress_callback:
+                overall_ratio = start_ratio + complete * (end_ratio - start_ratio)
+                stage_percent = int(complete * 100)
+                msg = f"{stage_title}... {stage_percent}%"
+                progress_callback(overall_ratio, msg)
+            return 1  # 返回 1 继续
+        return callback
 
     colored_ds = None
     colored_vsi_path = f"/vsimem/colored_{os.getpid()}.tif"
@@ -149,13 +179,13 @@ def convert_tif_to_kmz(
     try:
         working_ds = src_ds
 
-        # 1. 检查是否需要应用 QML 进行单波段伪彩色着色
-        if src_ds.RasterCount == 1 and qml_path and os.path.exists(qml_path):
+        # 1. 检查是否需要应用 QML 进行单波段伪彩色着色 (阶段一)
+        if has_qml:
             if cancel_check and cancel_check():
                 return False
 
             if progress_callback:
-                progress_callback(0.04, f"检测到单波段数据，正在应用 QML 色标渲染: {os.path.basename(qml_path)}...")
+                progress_callback(0.02, f"正在应用 QML 色标渲染: {os.path.basename(qml_path)}...")
 
             color_entries, ramp_type = parse_qml_color_ramp(qml_path)
             fd, temp_color_file = tempfile.mkstemp(suffix="_color.txt")
@@ -166,7 +196,7 @@ def convert_tif_to_kmz(
                 colorFilename=temp_color_file,
                 format="GTiff",
                 addAlpha=True,
-                callback=gdal_progress
+                callback=make_progress_handler(qml_span, "正在渲染 QML 色标")
             )
             colored_ds = gdal.DEMProcessing(
                 colored_vsi_path,
@@ -181,20 +211,22 @@ def convert_tif_to_kmz(
 
             working_ds = colored_ds
 
-        # 2. 检查是否需要重投影
+        # 2. 检查是否需要重投影 (阶段二)
         if cancel_check and cancel_check():
             return False
 
         need_reproject = auto_reproject and not is_wgs84(working_ds)
         if need_reproject:
             if progress_callback:
-                progress_callback(0.08, "检测到非 EPSG:4326 投影，正在进行坐标纠正 (Warp)...")
+                progress_callback(warp_span[0], "检测到非 EPSG:4326 投影，正在进行坐标纠正 (Warp)...")
 
             warp_options = gdal.WarpOptions(
                 dstSRS="EPSG:4326",
                 resampleAlg=gdal.GRA_Bilinear,
                 format="GTiff",
-                callback=gdal_progress
+                multithread=True,
+                warpOptions=["NUM_THREADS=ALL_CPUS"],
+                callback=make_progress_handler(warp_span, "正在纠偏坐标系")
             )
             warp_temp_ds = gdal.Warp(vsimem_path, working_ds, options=warp_options)
             if cancel_check and cancel_check():
@@ -203,17 +235,17 @@ def convert_tif_to_kmz(
                 raise RuntimeError("自动重投影 (EPSG:4326) 失败")
             working_ds = warp_temp_ds
 
-        # 3. 执行 Translate 切片 SuperOverlay
+        # 3. 执行 Translate 切片 SuperOverlay (阶段三)
         if cancel_check and cancel_check():
             return False
 
         if progress_callback:
-            progress_callback(0.12, "开始生成 KML SuperOverlay 金字塔瓦片 (PNG)...")
+            progress_callback(translate_span[0], "开始生成 KML SuperOverlay 金字塔瓦片 (PNG)...")
 
         translate_options = gdal.TranslateOptions(
             format="KMLSUPEROVERLAY",
             creationOptions=["FORMAT=PNG"],
-            callback=gdal_progress
+            callback=make_progress_handler(translate_span, "正在生成金字塔切片")
         )
 
         out_ds = gdal.Translate(output_kmz, working_ds, options=translate_options)
