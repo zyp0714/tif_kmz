@@ -1,7 +1,6 @@
 import os
 import sys
 import argparse
-import subprocess
 from datetime import datetime
 from typing import Optional, List, Dict
 
@@ -19,31 +18,8 @@ from osgeo import gdal, osr
 from converter import convert_tif_to_kmz, is_wgs84, setup_gdal_env, get_raster_metadata, convert_geodata_to_kmz
 from qml_parser import get_default_qml_path
 from gpkg_analyzer import analyze_gpkg
-
-
-def get_app_icon() -> QIcon:
-    """获取程序主图标（兼容开发环境与 PyInstaller 打包环境）"""
-    if getattr(sys, 'frozen', False):
-        base_candidates = [
-            getattr(sys, '_MEIPASS', ''),
-            os.path.dirname(sys.executable),
-            os.path.join(os.path.dirname(sys.executable), '_internal')
-        ]
-    else:
-        base_candidates = [
-            os.path.dirname(os.path.abspath(__file__))
-        ]
-
-    for b in base_candidates:
-        if not b:
-            continue
-        for name in ("logo.ico", "logo.png", "logo.svg"):
-            p = os.path.join(b, name)
-            if os.path.exists(p):
-                icon = QIcon(p)
-                if not icon.isNull():
-                    return icon
-    return QIcon()
+from styles import get_app_stylesheet
+from utils import get_app_icon, locate_file_in_explorer, copy_text_to_clipboard
 
 
 class TaskWorker(QThread):
@@ -106,187 +82,8 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(880, 600)
         self.setAcceptDrops(True)
 
-        # 工业专业风 QSS 样式表
-        self.setStyleSheet("""
-            QMainWindow {
-                background-color: #f8fafc;
-            }
-            QWidget {
-                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-            }
-            QFrame#cardFrame {
-                background-color: #ffffff;
-                border: 1px solid #e2e8f0;
-                border-radius: 6px;
-            }
-            QLabel#headerTitle {
-                font-size: 20px;
-                font-weight: 700;
-                color: #0f172a;
-            }
-            QLabel#headerSubTitle {
-                font-size: 12px;
-                color: #64748b;
-            }
-            QLabel#sectionTitle {
-                font-size: 13px;
-                font-weight: 600;
-                color: #1e293b;
-            }
-            QLabel#statusTag {
-                font-size: 12px;
-                color: #64748b;
-            }
-            QLineEdit {
-                background-color: #ffffff;
-                border: 1px solid #cbd5e1;
-                border-radius: 4px;
-                padding: 4px 8px;
-                font-size: 12px;
-                color: #1e293b;
-            }
-            QLineEdit:focus {
-                border-color: #3b82f6;
-            }
-            QComboBox {
-                background-color: #ffffff;
-                border: 1px solid #cbd5e1;
-                border-radius: 4px;
-                padding: 4px 8px;
-                font-size: 12px;
-                color: #1e293b;
-                min-width: 280px;
-            }
-            QComboBox:focus {
-                border-color: #3b82f6;
-            }
-            QPushButton#primaryBtn {
-                background-color: #3b82f6;
-                color: #ffffff;
-                font-size: 13px;
-                font-weight: 500;
-                border: none;
-                border-radius: 4px;
-                padding: 6px 16px;
-                min-height: 20px;
-            }
-            QPushButton#primaryBtn:hover {
-                background-color: #2563eb;
-            }
-            QPushButton#primaryBtn:pressed {
-                background-color: #1d4ed8;
-            }
-            QPushButton#primaryBtn:disabled {
-                background-color: #94a3b8;
-            }
-            QPushButton#dangerBtn {
-                background-color: #ef4444;
-                color: #ffffff;
-                font-size: 13px;
-                font-weight: 500;
-                border: none;
-                border-radius: 4px;
-                padding: 6px 16px;
-                min-height: 20px;
-            }
-            QPushButton#dangerBtn:hover {
-                background-color: #dc2626;
-            }
-            QPushButton#dangerBtn:pressed {
-                background-color: #b91c1c;
-            }
-            QPushButton#secondaryBtn {
-                background-color: #ffffff;
-                color: #475569;
-                font-size: 12px;
-                border: 1px solid #cbd5e1;
-                border-radius: 4px;
-                padding: 4px 12px;
-            }
-            QPushButton#secondaryBtn:hover {
-                background-color: #f1f5f9;
-                color: #1e293b;
-            }
-            QProgressBar {
-                border: 1px solid #e2e8f0;
-                border-radius: 3px;
-                background-color: #edf2f7;
-                height: 10px;
-                text-align: center;
-                font-size: 9px;
-            }
-            QProgressBar::chunk {
-                background-color: #3b82f6;
-                border-radius: 2px;
-            }
-            QTableWidget {
-                background-color: #ffffff;
-                border: 1px solid #e2e8f0;
-                border-radius: 4px;
-                gridline-color: #f1f5f9;
-                font-size: 12px;
-                color: #334155;
-            }
-            QTableWidget::item {
-                padding: 4px 8px;
-            }
-            QTableWidget::item:selected {
-                background-color: #eff6ff;
-                color: #1e40af;
-            }
-            QHeaderView::section {
-                background-color: #f8fafc;
-                color: #475569;
-                font-size: 12px;
-                font-weight: 600;
-                border: none;
-                border-bottom: 1px solid #e2e8f0;
-                padding: 6px 8px;
-            }
-            QTextEdit#logBox {
-                background-color: #ffffff;
-                border: 1px solid #e2e8f0;
-                border-radius: 4px;
-                font-family: "Consolas", "Courier New", monospace;
-                font-size: 11px;
-                color: #475569;
-                padding: 6px;
-            }
-            QCheckBox {
-                font-size: 12px;
-                color: #475569;
-            }
-            QStatusBar {
-                background-color: #ffffff;
-                border-top: 1px solid #e2e8f0;
-                font-size: 11px;
-                color: #64748b;
-            }
-            QMenu {
-                background-color: #ffffff;
-                border: 1px solid #cbd5e1;
-                border-radius: 6px;
-                padding: 4px;
-            }
-            QMenu::item {
-                padding: 6px 20px 6px 12px;
-                font-size: 12px;
-                color: #1e293b;
-                border-radius: 4px;
-            }
-            QMenu::item:selected {
-                background-color: #f1f5f9;
-                color: #0f172a;
-            }
-            QMenu::item:disabled {
-                color: #94a3b8;
-            }
-            QMenu::separator {
-                height: 1px;
-                background-color: #e2e8f0;
-                margin: 4px 6px;
-            }
-        """)
+        # 工业专业风 QSS 样式表（已抽离至 styles.py）
+        self.setStyleSheet(get_app_stylesheet())
 
         central_widget = QWidget(self)
         self.setCentralWidget(central_widget)
@@ -868,20 +665,11 @@ class MainWindow(QMainWindow):
             return
         task = self.tasks[row]
         file_path = task["output"] if target == "output" else task["input"]
-        target_name = "KMZ 成果" if target == "output" else "源文件"
-        if not os.path.exists(file_path):
-            QMessageBox.information(self, "提示", f"该{target_name}尚未生成或已被移除：\n{file_path}")
-            return
-        abs_path = os.path.abspath(file_path)
-        if sys.platform == "win32":
-            subprocess.Popen(f'explorer /select,"{abs_path}"')
-        else:
-            subprocess.Popen(["xdg-open", os.path.dirname(abs_path)])
+        locate_file_in_explorer(file_path, is_output=(target == "output"), parent=self)
 
     def copy_path_to_clipboard(self, path: str, desc: str):
         """将文件路径复制到系统剪贴板"""
-        clipboard = QGuiApplication.clipboard()
-        clipboard.setText(path)
+        copy_text_to_clipboard(path)
         self.append_log(f"已复制{desc}路径: {path}")
 
     def remove_selected_tasks(self):
