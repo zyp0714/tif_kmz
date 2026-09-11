@@ -196,6 +196,7 @@ def convert_tif_to_kmz(
                 colorFilename=temp_color_file,
                 format="GTiff",
                 addAlpha=True,
+                creationOptions=["TILED=YES", "BLOCKXSIZE=512", "BLOCKYSIZE=512"],
                 callback=make_progress_handler(qml_span, "正在渲染 QML 色标")
             )
             colored_ds = gdal.DEMProcessing(
@@ -226,6 +227,8 @@ def convert_tif_to_kmz(
                 format="GTiff",
                 multithread=True,
                 warpOptions=["NUM_THREADS=ALL_CPUS"],
+                creationOptions=["TILED=YES", "BLOCKXSIZE=512", "BLOCKYSIZE=512"],
+                warpMemoryLimit=1024 * 1024 * 1024,
                 callback=make_progress_handler(warp_span, "正在纠偏坐标系")
             )
             warp_temp_ds = gdal.Warp(vsimem_path, working_ds, options=warp_options)
@@ -239,12 +242,27 @@ def convert_tif_to_kmz(
         if cancel_check and cancel_check():
             return False
 
+        # 针对无 Alpha 透明通道的 3 波段普通 RGB 影像，使用 JPEG 格式切片可提速 5~10 倍；
+        # 针对带 Alpha 透明通道（如 InSAR 着色、含边界透明区）的数据，坚决保留 PNG 以防止黑边覆盖地球底图
+        has_alpha = False
+        if working_ds.RasterCount == 4:
+            has_alpha = True
+        elif working_ds.RasterCount >= 1:
+            for b in range(1, working_ds.RasterCount + 1):
+                band = working_ds.GetRasterBand(b)
+                if band.GetColorInterpretation() == gdal.GCI_AlphaBand or band.GetNoDataValue() is not None:
+                    has_alpha = True
+                    break
+
+        tile_fmt = "PNG" if (has_alpha or has_qml) else "JPEG"
+        tile_fmt_desc = "PNG (透明无损)" if tile_fmt == "PNG" else "JPEG (高速切片)"
+
         if progress_callback:
-            progress_callback(translate_span[0], "开始生成 KML SuperOverlay 金字塔瓦片 (PNG)...")
+            progress_callback(translate_span[0], f"开始生成 KML SuperOverlay 金字塔瓦片 ({tile_fmt_desc})...")
 
         translate_options = gdal.TranslateOptions(
             format="KMLSUPEROVERLAY",
-            creationOptions=["FORMAT=PNG"],
+            creationOptions=[f"FORMAT={tile_fmt}"],
             callback=make_progress_handler(translate_span, "正在生成金字塔切片")
         )
 
