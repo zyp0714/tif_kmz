@@ -893,6 +893,8 @@ def main():
         # 强制 Qt Windows 平台不启用深色模式
         os.environ["QT_QPA_PLATFORM"] = "windows:darkmode=0"
         app = QApplication(sys.argv)
+        app.setApplicationName("GeoKMZ")
+        app.setApplicationDisplayName("GeoKMZ")
         app.setWindowIcon(get_app_icon())
         window = MainWindow()
         window.show()
