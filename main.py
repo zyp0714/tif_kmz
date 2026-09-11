@@ -12,12 +12,37 @@ from PySide6.QtWidgets import (
     QTableWidgetItem, QHeaderView, QFileDialog, QCheckBox,
     QMessageBox, QFrame, QStatusBar, QLineEdit, QComboBox
 )
-from PySide6.QtGui import QFont, QDragEnterEvent, QDropEvent
+from PySide6.QtGui import QFont, QDragEnterEvent, QDropEvent, QIcon, QPixmap
 from osgeo import gdal, osr
 
 from converter import convert_tif_to_kmz, is_wgs84, setup_gdal_env, get_raster_metadata, convert_geodata_to_kmz
 from qml_parser import get_default_qml_path
 from gpkg_analyzer import analyze_gpkg
+
+
+def get_app_icon() -> QIcon:
+    """获取程序主图标（兼容开发环境与 PyInstaller 打包环境）"""
+    if getattr(sys, 'frozen', False):
+        base_candidates = [
+            getattr(sys, '_MEIPASS', ''),
+            os.path.dirname(sys.executable),
+            os.path.join(os.path.dirname(sys.executable), '_internal')
+        ]
+    else:
+        base_candidates = [
+            os.path.dirname(os.path.abspath(__file__))
+        ]
+
+    for b in base_candidates:
+        if not b:
+            continue
+        for name in ("logo.ico", "logo.png", "logo.svg"):
+            p = os.path.join(b, name)
+            if os.path.exists(p):
+                icon = QIcon(p)
+                if not icon.isNull():
+                    return icon
+    return QIcon()
 
 
 class TaskWorker(QThread):
@@ -66,6 +91,7 @@ class MainWindow(QMainWindow):
 
     def init_ui(self):
         self.setWindowTitle("GeoTIFF to KMZ Processor")
+        self.setWindowIcon(get_app_icon())
         self.resize(1000, 700)
         self.setMinimumSize(880, 600)
         self.setAcceptDrops(True)
@@ -220,6 +246,17 @@ class MainWindow(QMainWindow):
 
         # 1. 顶栏 (Header Section)
         header_layout = QHBoxLayout()
+        header_layout.setSpacing(12)
+
+        # 软件品牌 Logo 图标
+        logo_icon = get_app_icon()
+        if not logo_icon.isNull():
+            logo_label = QLabel(self)
+            logo_pix = logo_icon.pixmap(36, 36)
+            logo_label.setPixmap(logo_pix)
+            logo_label.setFixedSize(36, 36)
+            header_layout.addWidget(logo_label)
+
         title_layout = QVBoxLayout()
         title_label = QLabel("GeoTIFF to KMZ Processor", self)
         title_label.setObjectName("headerTitle")
@@ -774,9 +811,18 @@ def main():
     if args.input and args.output:
         run_cli(args)
     else:
+        # 设置 Windows 任务栏应用组 ID，保证任务栏正确显示自定义图标
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("geobridge.tif2kmz.app.1.0")
+            except Exception:
+                pass
+
         # 强制 Qt Windows 平台不启用深色模式
         os.environ["QT_QPA_PLATFORM"] = "windows:darkmode=0"
         app = QApplication(sys.argv)
+        app.setWindowIcon(get_app_icon())
         window = MainWindow()
         window.show()
         sys.exit(app.exec())

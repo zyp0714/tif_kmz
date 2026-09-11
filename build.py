@@ -116,9 +116,16 @@ def build(onedir=True):
         "main.py"
     ]
 
-    # 添加数据文件夹与内置样式文件映射
+    # 添加图标配置
+    if os.path.exists("logo.ico"):
+        cmd.append("--icon=logo.ico")
+
+    # 添加数据文件夹与内置样式文件、图标文件映射
     if os.path.exists("default_subsidence.qml"):
         cmd.append("--add-data=default_subsidence.qml;.")
+    for logo_asset in ["logo.ico", "logo.png", "logo.svg"]:
+        if os.path.exists(logo_asset):
+            cmd.append(f"--add-data={logo_asset};.")
     if proj_dir and os.path.exists(proj_dir):
         cmd.append(f"--add-data={proj_dir};share/proj")
     if gdal_dir and os.path.exists(gdal_dir):
