@@ -770,11 +770,7 @@ class MainWindow(QMainWindow):
         self.append_log(f"已复制{desc}路径: {path}")
 
     def remove_selected_tasks(self):
-        """从任务列表中移除选中的项 (支持多选和 Delete 快捷键)"""
-        if self.is_batch_running:
-            QMessageBox.warning(self, "警告", "正在执行转换任务，请等待批处理完成或稍后再移除。")
-            return
-
+        """从任务列表中移除选中的项 (支持多选和 Delete 快捷键，可在批处理运行时删除排队或已完成项)"""
         selected_indexes = self.table.selectedIndexes()
         if not selected_indexes:
             return
@@ -783,18 +779,45 @@ class MainWindow(QMainWindow):
         if not selected_rows:
             return
 
+        skipped_running = False
+        removed_count = 0
+
         for r in selected_rows:
             if r < len(self.tasks):
+                # 如果正在运行批处理，保护当前正在切片的任务不被强行打断
+                if self.is_batch_running and r == self.current_task_idx:
+                    skipped_running = True
+                    continue
+
                 del self.tasks[r]
                 self.table.removeRow(r)
+                removed_count += 1
+
+                # 若被删除的行在当前正在处理的任务之前，相应递减当前任务索引以保持队列对齐
+                if self.is_batch_running and r < self.current_task_idx:
+                    self.current_task_idx -= 1
 
         total = len(self.tasks)
-        self.progress_ratio_label.setText(f"0 / {total} · 0.0%")
         if total == 0:
             self.task_status_tag.setText("等待开始")
             self.task_detail_label.setText("选择文件或拖拽 .tif / .gpkg 文件到列表中开始处理")
             self.progress_bar.setValue(0)
-        self.append_log(f"已从任务列表中移除 {len(selected_rows)} 项。")
+            self.progress_ratio_label.setText("0 / 0 · 0.0%")
+        elif self.is_batch_running:
+            cur_num = self.current_task_idx + 1
+            self.task_status_tag.setText(f"正在处理 ({cur_num}/{total})")
+            task_ratio = self.current_task_idx / total
+            self.progress_ratio_label.setText(f"{self.current_task_idx} / {total} · {task_ratio*100:.1f}%")
+        else:
+            self.progress_ratio_label.setText(f"0 / {total} · 0.0%")
+
+        if removed_count > 0:
+            self.append_log(f"已从任务列表中移除 {removed_count} 项。")
+
+        if skipped_running:
+            self.append_log("提示: 正在切片处理中的任务暂不支持直接移除，已保留。")
+            if removed_count == 0:
+                QMessageBox.information(self, "提示", "当前正在切片处理中的文件不支持直接移除，可移除排队中或已完成的任务。")
 
     def show_table_context_menu(self, pos):
         """弹出任务列表右键上下文菜单"""
@@ -846,10 +869,17 @@ class MainWindow(QMainWindow):
 
         menu.addSeparator()
 
-        # 3. 列表中移除此项 (支持多选及 Delete 快捷键)
+        # 3. 列表中移除此项 (支持多选及 Delete 快捷键，转换中支持删除排队或已完成项)
         count_str = f" ({len(selected_rows)} 项)" if len(selected_rows) > 1 else ""
-        remove_action = menu.addAction(f"从列表中移除{count_str}\tDel")
-        remove_action.setEnabled(not self.is_batch_running)
+        remove_enabled = True
+        remove_text = f"从列表中移除{count_str}\tDel"
+        if self.is_batch_running:
+            if all(r == self.current_task_idx for r in selected_rows):
+                remove_enabled = False
+                remove_text = "从列表中移除 (正在处理中不可删)"
+
+        remove_action = menu.addAction(remove_text)
+        remove_action.setEnabled(remove_enabled)
         remove_action.triggered.connect(self.remove_selected_tasks)
 
         menu.exec(self.table.viewport().mapToGlobal(pos))
