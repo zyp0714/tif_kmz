@@ -46,9 +46,15 @@
 - **统一输出目录与结果定位**：支持自定义输出目录，双击结果行一键定位成果文件。
 - **CLI 命令行兼容**：支持 `python main.py -i <input.tif> -o <output.kmz> [-q style.qml] [--no-warp]`。
 
-### 5. 便携独立打包与体积瘦身 (`build.py`)
-- **依赖注入**：通过 `--add-data` 自动封装 PROJ 数据字典、GDAL 数据字典及 `default_subsidence.qml`。
-- **Intel MKL 深度剔除**：打包后自动清除无用的 MKL / TBB 动态链接库，**将包体积从 751 MB 深度缩减至 132 MB**。
+### 5. 极致轻量单文件独立打包与全面瘦身 (`build.py`)
+- **一键单文件封装 (Single File EXE)**：通过 PyInstaller 生成完全独立的单文件 `GeoKMZ.exe`（仅单个文件，双击即用，无需携带任何附属文件夹）。
+- **全面剔除所有不必要库与冗余二进制**：
+  - 彻底剔除 Intel MKL 深度计算库（500MB+）、Intel TBB 并行库（30MB+）；
+  - 剔除 MPI 网络集群库 (`msmpi`, `impi`)、Tkinter / Tcl 库；
+  - 排除未引用的 Qt 大组件（WebEngine、Qml、3D、Multimedia、Bluetooth、Sensors、Charts 等）；
+  - 排除未在运行时使用的科学计算包（NumPy、SciPy、Matplotlib、Pandas 等）；
+  - **单文件最终体积由 750MB+ 极致压缩至 69.0 MB**，启动迅速，零外部依赖。
+- **全内置资源自动化嵌入**：PROJ 数据字典、GDAL 数据字典、默认 InSAR 沉降色标、高质量 SVG/ICO 品牌图标全部内嵌于单文件。
 
 ### 6. 自动化测试套件 (`tests/test_insar_e2e.py`)
 - 自动生成合成单波段 Float32 沉降漏斗栅格，执行全套切片，并对 KMZ 解包校验内部 4 通道 RGBA PNG 瓦片与透明度。
